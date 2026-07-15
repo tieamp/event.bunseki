@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>主催ライブ チケット購入者分析ダッシュボード</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script>
+// 主催ライブ チケット購入者分析ロジック (ブラウザ / Node 共用)
+// analyze.py の集計ロジックをJavaScriptに移植したもの。
+
+const STATUS_ISSUED = "発券済み";
+
+function normStr(v) {
+  if (v === undefined || v === null) return "";
+  return String(v).trim();
+}
+
+function toNum(v, fallback) {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// difflib.SequenceMatcher.ratio() の簡易近似 (Levenshtein距離ベース)
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+
+function similarityRatio(a, b) {
+  if (a === b) return 1;
+  const dist = levenshtein(a, b);
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1;
+  return 1 - dist / maxLen;
+}
+
+function findSimilarNames(names, cutoff = 0.82) {
+  const uniq = Array.from(new Set(names.filter((n) => n && n.trim()))).sort();
+  const pairs = [];
+  for (let i = 0; i < uniq.length; i++) {
+    for (let j = i + 1; j < uniq.length; j++) {
+      const ratio = similarityRatio(uniq[i], uniq[j]);
+      if (ratio >= cutoff) {
+        pairs.push({ 候補A: uniq[i], 候補B: uniq[j], 類似度: Math.round(ratio * 100) / 100 });
+      }
+    }
+  }
+  pairs.sort((x, y) => y.類似度 - x.類似度);
+  return pairs;
+}
+
+// 1行分のCSVレコードを正規化する
+function normalizeRow(row, venue, dateLabel, sourceFile) {
+  const email = normStr(row["申込者Email"]);
+  const uid = normStr(row["申込者UID"]);
+  const name = normStr(row["申込者本名"]);
+  const phone = normStr(row["申込者電話番号"]);
+  let customerKey;
+  if (email) customerKey = "email:" + email.toLowerCase();
+  else if (uid) customerKey = "uid:" + uid;
+  else customerKey = `name:${name}|${phone}`;
+
+  const qty = toNum(row["申込枚数"], 1);
+  const price = toNum(row["チケット単価"], 0);
+
+  return {
+    申込日時: row["申込日時"] ? new Date(row["申込日時"].replace(" ", "T")) : null,
+    申込者本名: name,
+    申込者Email: email,
+    申込者性別: normStr(row["申込者性別"]),
+    申込者年齢: row["申込者年齢"] !== undefined && row["申込者年齢"] !== "" ? toNum(row["申込者年齢"], null) : null,
+    申込者都道府県: normStr(row["申込者都道府県"]),
+    お目当て: normStr(row["お目当て"]),
+    ステータス: normStr(row["ステータス"]),
+    支払い方法: normStr(row["支払い方法"]),
+    券種名: normStr(row["券種名"]),
+    申込枚数: qty,
+    チケット単価: price,
+    金額: qty * price,
+    event: `${venue}_${dateLabel}`,
+    event_venue: venue,
+    source_file: sourceFile,
+    customer_key: customerKey,
+  };
+}
+
+// PapaParseの結果(rows: オブジェクト配列)から正規化済みレコード配列を作る
+function loadEventRows(rows, sourceFile) {
+  const withDates = rows
+    .map((r) => (r["申込日時"] ? new Date(r["申込日時"].replace(" ", "T")) : null))
+    .filter((d) => d && !isNaN(d.getTime()));
+  const start = withDates.length ? new Date(Math.min(...withDates.map((d) => d.getTime()))) : null;
+  const venue = (rows.find((r) => normStr(r["会場名/公演名"]))?.["会場名/公演名"] || sourceFile).trim();
+
+  const pad = (n) => String(n).padStart(2, "0");
+  const dateLabel = start
+    ? `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}_${pad(start.getHours())}${pad(start.getMinutes())}`
+    : sourceFile;
+
+  return rows.map((r) => normalizeRow(r, venue, dateLabel, sourceFile));
+}
+
+function eventOrder(records) {
+  const starts = new Map();
+  for (const r of records) {
+    if (!r.申込日時) continue;
+    const t = r.申込日時.getTime();
+    if (!starts.has(r.event) || t < starts.get(r.event)) starts.set(r.event, t);
+  }
+  return Array.from(starts.entries())
+    .sort((a, b) => a[1] - b[1])
+    .map(([ev]) => ev);
+}
+
+function groupBy(arr, keyFn) {
+  const m = new Map();
+  for (const item of arr) {
+    const k = keyFn(item);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(item);
+  }
+  return m;
+}
+
+function sum(arr, fn) {
+  return arr.reduce((a, b) => a + fn(b), 0);
+}
+
+function buildEventSummary(records) {
+  const order = eventOrder(records);
+  const byEvent = groupBy(records, (r) => r.event);
+  return order.map((ev) => {
+    const sub = byEvent.get(ev);
+    const issued = sub.filter((r) => r.ステータス === STATUS_ISSUED);
+    const expired = sub.filter((r) => r.ステータス !== STATUS_ISSUED);
+    const cvs = sub.filter((r) => r.支払い方法 === "コンビニ");
+    const cvsExpired = cvs.filter((r) => r.ステータス !== STATUS_ISSUED);
+    const startDate = sub
+      .map((r) => r.申込日時)
+      .filter(Boolean)
+      .sort((a, b) => a - b)[0];
+    return {
+      公演: ev,
+      会場: sub[0].event_venue,
+      開始日: startDate ? startDate.toISOString().slice(0, 10) : null,
+      申込件数: sub.length,
+      ユニーク購入者数: new Set(sub.map((r) => r.customer_key)).size,
+      発券済み枚数: sum(issued, (r) => r.申込枚数),
+      確定売上: sum(issued, (r) => r.金額),
+      期限切れ_未発券件数: expired.length,
+      機会損失額: sum(expired, (r) => r.金額),
+      コンビニ払い件数: cvs.length,
+      コンビニ払い期限切れ率: cvs.length ? Math.round((cvsExpired.length / cvs.length) * 1000) / 10 : null,
+      平均年齢: (() => {
+        const ages = sub.map((r) => r.申込者年齢).filter((a) => a !== null && a !== undefined);
+        return ages.length ? Math.round((sum(ages, (a) => a) / ages.length) * 10) / 10 : null;
+      })(),
+      男性数: sub.filter((r) => r.申込者性別 === "男性").length,
+      女性数: sub.filter((r) => r.申込者性別 === "女性").length,
+    };
+  });
+}
+
+function buildCustomerMaster(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED);
+  const byCustomer = groupBy(issued, (r) => r.customer_key);
+  const result = [];
+  for (const [key, rows] of byCustomer.entries()) {
+    const events = new Set(rows.map((r) => r.event));
+    const dates = rows.map((r) => r.申込日時).filter(Boolean).sort((a, b) => a - b);
+    result.push({
+      customer_key: key,
+      表示名: rows[0].申込者本名,
+      Email: rows[0].申込者Email,
+      来場回数: events.size,
+      累計枚数: sum(rows, (r) => r.申込枚数),
+      累計金額: sum(rows, (r) => r.金額),
+      初回来場: dates.length ? dates[0].toISOString() : null,
+      最終来場: dates.length ? dates[dates.length - 1].toISOString() : null,
+      参加公演: Array.from(events).sort().join(", "),
+    });
+  }
+  result.sort((a, b) => b.来場回数 - a.来場回数 || b.累計金額 - a.累計金額);
+  return result;
+}
+
+function buildNewVsRepeat(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED);
+  const order = eventOrder(issued);
+  const byEvent = groupBy(issued, (r) => r.event);
+  const seen = new Set();
+  const rows = [];
+  for (const ev of order) {
+    const customers = new Set(byEvent.get(ev).map((r) => r.customer_key));
+    let newCount = 0,
+      repeatCount = 0;
+    for (const c of customers) {
+      if (seen.has(c)) repeatCount++;
+      else newCount++;
+    }
+    rows.push({
+      公演: ev,
+      新規顧客数: newCount,
+      リピーター数: repeatCount,
+      リピーター比率: customers.size ? Math.round((repeatCount / customers.size) * 1000) / 10 : 0,
+    });
+    for (const c of customers) seen.add(c);
+  }
+  return rows;
+}
+
+function buildDormantCustomers(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED);
+  const order = eventOrder(issued);
+  if (order.length < 2) return [];
+  const latest = order[order.length - 1];
+  const byEvent = groupBy(issued, (r) => r.event);
+  const latestCustomers = new Set(byEvent.get(latest).map((r) => r.customer_key));
+  const past = issued.filter((r) => r.event !== latest);
+  const byCustomer = groupBy(past, (r) => r.customer_key);
+  const result = [];
+  for (const [key, rows] of byCustomer.entries()) {
+    if (latestCustomers.has(key)) continue;
+    const sorted = rows.slice().sort((a, b) => (a.申込日時 || 0) - (b.申込日時 || 0));
+    const last = sorted[sorted.length - 1];
+    result.push({
+      表示名: last.申込者本名,
+      Email: last.申込者Email,
+      最終来場公演: last.event,
+      最終来場日: last.申込日時 ? last.申込日時.toISOString().slice(0, 10) : null,
+      来場回数: new Set(rows.map((r) => r.event)).size,
+    });
+  }
+  result.sort((a, b) => b.来場回数 - a.来場回数 || (b.最終来場日 || "").localeCompare(a.最終来場日 || ""));
+  return result;
+}
+
+function buildPerformerSummary(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED && r.お目当て);
+  const byPerformer = groupBy(issued, (r) => r.お目当て);
+  const rows = [];
+  for (const [name, sub] of byPerformer.entries()) {
+    rows.push({
+      お目当て: name,
+      申込件数: sub.length,
+      ユニーク集客数: new Set(sub.map((r) => r.customer_key)).size,
+      出演公演数: new Set(sub.map((r) => r.event)).size,
+    });
+  }
+  rows.sort((a, b) => b.申込件数 - a.申込件数);
+  return rows;
+}
+
+function buildPerformerOverlap(records, topN = 10) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED && r.お目当て);
+  const counts = new Map();
+  for (const r of issued) counts.set(r.お目当て, (counts.get(r.お目当て) || 0) + 1);
+  const top = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([name]) => name);
+  const fanSets = new Map(top.map((p) => [p, new Set(issued.filter((r) => r.お目当て === p).map((r) => r.customer_key))]));
+  const rows = [];
+  for (let i = 0; i < top.length; i++) {
+    for (let j = i + 1; j < top.length; j++) {
+      const a = fanSets.get(top[i]);
+      const b = fanSets.get(top[j]);
+      const inter = new Set([...a].filter((x) => b.has(x)));
+      const union = new Set([...a, ...b]);
+      if (union.size === 0) continue;
+      rows.push({
+        出演者A: top[i],
+        出演者B: top[j],
+        共通ファン数: inter.size,
+        重複率: Math.round((inter.size / union.size) * 1000) / 10,
+      });
+    }
+  }
+  rows.sort((a, b) => b.共通ファン数 - a.共通ファン数);
+  return rows;
+}
+
+function buildDemographics(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED);
+  const ageBins = [
+    [0, 19, "~19"], [20, 24, "20-24"], [25, 29, "25-29"], [30, 34, "30-34"],
+    [35, 39, "35-39"], [40, 44, "40-44"], [45, 49, "45-49"], [50, 54, "50-54"],
+    [55, 59, "55-59"], [60, 999, "60+"],
+  ];
+  const ageCounts = new Map(ageBins.map((b) => [b[2], 0]));
+  for (const r of issued) {
+    if (r.申込者年齢 === null || r.申込者年齢 === undefined) continue;
+    const bin = ageBins.find(([lo, hi]) => r.申込者年齢 >= lo && r.申込者年齢 <= hi);
+    if (bin) ageCounts.set(bin[2], ageCounts.get(bin[2]) + 1);
+  }
+
+  const genderCounts = new Map();
+  for (const r of issued) {
+    if (!r.申込者性別) continue;
+    genderCounts.set(r.申込者性別, (genderCounts.get(r.申込者性別) || 0) + 1);
+  }
+
+  const prefCounts = new Map();
+  for (const r of issued) {
+    if (!r.申込者都道府県) continue;
+    prefCounts.set(r.申込者都道府県, (prefCounts.get(r.申込者都道府県) || 0) + 1);
+  }
+
+  const ticketTypeCounts = new Map();
+  for (const r of issued) {
+    if (!r.券種名) continue;
+    ticketTypeCounts.set(r.券種名, (ticketTypeCounts.get(r.券種名) || 0) + 1);
+  }
+
+  return {
+    age: Array.from(ageCounts.entries()).map(([k, v]) => ({ label: k, count: v })),
+    gender: Array.from(genderCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => ({ label: k, count: v })),
+    prefecture: Array.from(prefCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => ({ label: k, count: v })),
+    ticketType: Array.from(ticketTypeCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => ({ label: k, count: v })),
+  };
+}
+
+function buildPaymentAnalysis(records) {
+  const byMethod = groupBy(
+    records.filter((r) => r.支払い方法),
+    (r) => r.支払い方法
+  );
+  const rows = [];
+  for (const [method, sub] of byMethod.entries()) {
+    const issued = sub.filter((r) => r.ステータス === STATUS_ISSUED).length;
+    const expired = sub.length - issued;
+    rows.push({
+      支払い方法: method,
+      件数: sub.length,
+      発券済み: issued,
+      期限切れ_未発券: expired,
+      期限切れ率: sub.length ? Math.round((expired / sub.length) * 1000) / 10 : 0,
+    });
+  }
+  rows.sort((a, b) => b.件数 - a.件数);
+  return rows;
+}
+
+const DOW_LABEL_JA = ["日", "月", "火", "水", "木", "金", "土"];
+
+function buildTimingAnalysis(records) {
+  const withDate = records.filter((r) => r.申込日時);
+  const dowCounts = new Array(7).fill(0);
+  const hourCounts = new Array(24).fill(0);
+  for (const r of withDate) {
+    dowCounts[r.申込日時.getDay()]++;
+    hourCounts[r.申込日時.getHours()]++;
+  }
+  // 月曜始まりに並べ替え
+  const dowOrderIdx = [1, 2, 3, 4, 5, 6, 0];
+  const dow = dowOrderIdx.map((i) => ({ label: DOW_LABEL_JA[i], count: dowCounts[i] }));
+  const hour = hourCounts.map((c, h) => ({ label: `${h}時`, count: c }));
+
+  const order = eventOrder(withDate);
+  const byEvent = groupBy(withDate, (r) => r.event);
+  const speed = order.map((ev) => {
+    const sub = byEvent.get(ev);
+    const start = Math.min(...sub.map((r) => r.申込日時.getTime()));
+    const total = sub.length;
+    const within = (minutes) => sub.filter((r) => (r.申込日時.getTime() - start) / 60000 <= minutes).length;
+    return {
+      公演: ev,
+      申込件数: total,
+      "10分以内": total ? Math.round((within(10) / total) * 1000) / 10 : 0,
+      "1時間以内": total ? Math.round((within(60) / total) * 1000) / 10 : 0,
+      "1日以内": total ? Math.round((within(1440) / total) * 1000) / 10 : 0,
+    };
+  });
+
+  return { dow, hour, speed };
+}
+
+function buildDataQuality(records) {
+  const performerNames = records.map((r) => r.お目当て).filter(Boolean);
+  const ticketTypeNames = records.map((r) => r.券種名).filter(Boolean);
+  return {
+    performerDupe: findSimilarNames(performerNames),
+    ticketTypeDupe: findSimilarNames(ticketTypeNames),
+    missing: {
+      email: records.filter((r) => !r.申込者Email).length,
+      prefecture: records.filter((r) => !r.申込者都道府県).length,
+      age: records.filter((r) => r.申込者年齢 === null || r.申込者年齢 === undefined).length,
+      gender: records.filter((r) => !r.申込者性別).length,
+    },
+  };
+}
+
+function runFullAnalysis(records) {
+  return {
+    eventSummary: buildEventSummary(records),
+    customerMaster: buildCustomerMaster(records),
+    newVsRepeat: buildNewVsRepeat(records),
+    dormant: buildDormantCustomers(records),
+    performerSummary: buildPerformerSummary(records),
+    performerOverlap: buildPerformerOverlap(records),
+    demographics: buildDemographics(records),
+    payment: buildPaymentAnalysis(records),
+    timing: buildTimingAnalysis(records),
+    quality: buildDataQuality(records),
+  };
+}
+
+if (typeof module !== "undefined") {
+  module.exports = {
+    loadEventRows,
+    runFullAnalysis,
+    buildEventSummary,
+    buildCustomerMaster,
+    buildNewVsRepeat,
+    buildDormantCustomers,
+    buildPerformerSummary,
+    buildPerformerOverlap,
+    buildDemographics,
+    buildPaymentAnalysis,
+    buildTimingAnalysis,
+    buildDataQuality,
+    findSimilarNames,
+  };
+}
+
+</script>
+<style>
+  :root {
+    --bg: #f4f6fb;
+    --card-bg: #ffffff;
+    --primary: #2f5496;
+    --primary-dark: #1f3a6e;
+    --accent: #e8792c;
+    --text: #1f2430;
+    --muted: #6b7280;
+    --border: #e3e7f0;
+    --good: #2e9e5b;
+    --warn: #d1453b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    background: linear-gradient(120deg, var(--primary), var(--primary-dark));
+    color: #fff;
+    padding: 28px 32px;
+  }
+  header h1 { margin: 0 0 6px; font-size: 22px; }
+  header p { margin: 0; opacity: 0.85; font-size: 13px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 20px 60px; }
+
+  .upload-box {
+    background: var(--card-bg);
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    text-align: center;
+    margin-bottom: 24px;
+    transition: border-color .2s, background .2s;
+  }
+  .upload-box.dragover { border-color: var(--primary); background: #eef2fb; }
+  .upload-box p { margin: 4px 0; color: var(--muted); font-size: 13px; }
+  .upload-box input[type=file] { display: none; }
+  .upload-btn {
+    display: inline-block;
+    background: var(--primary);
+    color: #fff;
+    padding: 10px 22px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-top: 8px;
+  }
+  .upload-btn:hover { background: var(--primary-dark); }
+  .file-list { margin-top: 14px; font-size: 12px; color: var(--muted); text-align: left; max-width: 520px; margin-left: auto; margin-right: auto; }
+  .file-list div { padding: 2px 0; }
+
+  .privacy-note {
+    font-size: 12px;
+    color: var(--muted);
+    background: #eef2fb;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 24px;
+  }
+
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px;
+    margin-bottom: 28px;
+  }
+  .kpi-card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .kpi-card .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .kpi-card .value { font-size: 22px; font-weight: 700; color: var(--primary-dark); }
+  .kpi-card .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  section.panel {
+    background: var(--card-bg);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    padding: 20px 22px;
+    margin-bottom: 20px;
+  }
+  section.panel h2 {
+    font-size: 15px;
+    margin: 0 0 4px;
+    color: var(--primary-dark);
+  }
+  section.panel .desc { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+
+  .chart-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 20px;
+  }
+  .chart-box { position: relative; height: 300px; }
+  .chart-box.tall { height: 360px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  th, td {
+    border-bottom: 1px solid var(--border);
+    padding: 7px 10px;
+    text-align: right;
+    white-space: nowrap;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #f7f9fd; color: var(--primary-dark); font-weight: 600; position: sticky; top: 0; }
+  tr:hover td { background: #fbfcfe; }
+  .table-scroll { max-height: 380px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; }
+  .badge.warn { background: #fdeceb; color: var(--warn); }
+  .badge.good { background: #e9f8ee; color: var(--good); }
+
+  .hidden { display: none !important; }
+  .empty-state { text-align: center; color: var(--muted); padding: 40px 0; font-size: 13px; }
+  footer { text-align: center; color: var(--muted); font-size: 11px; padding: 20px 0 40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>主催ライブ チケット購入者分析ダッシュボード</h1>
+  <p>チケット申込者CSV(複数公演分)をアップロードすると、公演サマリー・リピーター・出演者集客・属性・決済・タイミングをグラフと表で可視化します。</p>
+</header>
+
+<main>
+  <div class="upload-box" id="uploadBox">
+    <p><strong>ここにCSVファイルをドラッグ&ドロップ</strong>、またはボタンから選択してください(複数選択可)</p>
+    <label class="upload-btn" for="fileInput">CSVファイルを選択</label>
+    <input type="file" id="fileInput" accept=".csv" multiple>
+    <div class="file-list" id="fileList"></div>
+  </div>
+
+  <div class="privacy-note">
+    このツールはすべてブラウザ内(あなたのパソコン上)でCSVを処理します。ファイルはサーバーには一切送信されません。GitHub Pagesなどで公開してご利用いただけますが、購入者の個人情報を含むCSV自体はリポジトリにコミットしないようご注意ください。
+  </div>
+
+  <div id="emptyState" class="empty-state">CSVファイルをアップロードすると分析結果が表示されます。</div>
+
+  <div id="dashboard" class="hidden">
+
+    <div class="kpi-grid" id="kpiGrid"></div>
+
+    <section class="panel">
+      <h2>公演サマリー</h2>
+      <div class="desc">公演ごとの申込件数・売上・機会損失・コンビニ払い期限切れ率など</div>
+      <div class="table-scroll"><table id="eventSummaryTable"></table></div>
+    </section>
+
+    <section class="panel">
+      <h2>売上・新規vsリピーターの推移</h2>
+      <div class="desc">公演の開催順に並べています</div>
+      <div class="chart-grid">
+        <div class="chart-box"><canvas id="chartRevenue"></canvas></div>
+        <div class="chart-box"><canvas id="chartNewRepeat"></canvas></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>出演者(お目当て)分析</h2>
+      <div class="desc">申込件数上位10組の集客力と、公演をまたいだファン層の重複</div>
+      <div class="chart-grid">
+        <div class="chart-box tall"><canvas id="chartPerformer"></canvas></div>
+        <div>
+          <div class="table-scroll" style="max-height:360px">
+            <table id="overlapTable"></table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>購入者属性</h2>
+      <div class="desc">年齢層・性別・都道府県・券種の分布(発券済みのみ集計)</div>
+      <div class="chart-grid">
+        <div class="chart-box"><canvas id="chartAge"></canvas></div>
+        <div class="chart-box"><canvas id="chartGender"></canvas></div>
+        <div class="chart-box"><canvas id="chartPref"></canvas></div>
+        <div class="chart-box"><canvas id="chartTicketType"></canvas></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>決済方法・申込タイミング</h2>
+      <div class="desc">支払い方法別の期限切れ率、曜日・時間帯別の申込集中度、発売開始からの初速</div>
+      <div class="chart-grid">
+        <div class="chart-box"><canvas id="chartPayment"></canvas></div>
+        <div class="chart-box"><canvas id="chartDow"></canvas></div>
+        <div class="chart-box"><canvas id="chartHour"></canvas></div>
+        <div class="chart-box"><canvas id="chartSpeed"></canvas></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>顧客マスタ(LTVランキング)</h2>
+      <div class="desc">来場回数・累計金額が多い順(上位30名)</div>
+      <div class="table-scroll"><table id="customerTable"></table></div>
+    </section>
+
+    <section class="panel">
+      <h2>休眠顧客</h2>
+      <div class="desc">過去には来場歴があるが、直近公演には来ていない顧客</div>
+      <div class="table-scroll"><table id="dormantTable"></table></div>
+    </section>
+
+    <section class="panel">
+      <h2>データ品質チェック</h2>
+      <div class="desc">出演者名・券種名の表記ゆれ候補、主要項目の欠損状況</div>
+      <div class="chart-grid">
+        <div><div class="table-scroll" style="max-height:220px"><table id="qualityPerformerTable"></table></div></div>
+        <div><div class="table-scroll" style="max-height:220px"><table id="qualityTicketTable"></table></div></div>
+      </div>
+      <div id="missingSummary" style="margin-top:14px; font-size:12.5px; color: var(--muted);"></div>
+    </section>
+
+  </div>
+</main>
+
+<footer>主催ライブ チケット購入者分析ツール — データはブラウザ内でのみ処理されます</footer>
+
+<script>
+const CHART_COLORS = ["#2f5496", "#e8792c", "#2e9e5b", "#9b59b6", "#d1453b", "#17a2b8", "#f1c40f", "#8395a7", "#576574", "#ee5253"];
+let charts = {};
+let allRecords = [];
+const loadedFiles = new Set();
+
+function fmtNum(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "-";
+  return Number(n).toLocaleString("ja-JP");
+}
+
+function destroyChart(id) {
+  if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+}
+
+function makeChart(id, config) {
+  destroyChart(id);
+  const ctx = document.getElementById(id).getContext("2d");
+  charts[id] = new Chart(ctx, config);
+}
+
+function renderTable(tableId, columns, rows) {
+  const table = document.getElementById(tableId);
+  const thead = "<thead><tr>" + columns.map(c => `<th>${c.label}</th>`).join("") + "</tr></thead>";
+  const tbody = "<tbody>" + rows.map(row => {
+    return "<tr>" + columns.map(c => {
+      const raw = row[c.key];
+      const val = c.fmt ? c.fmt(raw, row) : (raw === null || raw === undefined ? "-" : raw);
+      return `<td>${val}</td>`;
+    }).join("") + "</tr>";
+  }).join("") + "</tbody>";
+  table.innerHTML = thead + tbody;
+}
+
+function shortEventLabel(ev) {
+  // "会場_YYYY-MM-DD_HHMM" -> "会場 M/D H:MM"
+  const m = ev.match(/^(.*)_(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})$/);
+  if (!m) return ev;
+  const [, venue, , mo, da, hh, mi] = m;
+  return `${venue} ${parseInt(mo)}/${parseInt(da)} ${hh}:${mi}`;
+}
+
+function updateKpis(result, recordCount) {
+  const es = result.eventSummary;
+  const totalRevenue = es.reduce((a, b) => a + b.確定売上, 0);
+  const totalLoss = es.reduce((a, b) => a + b.機会損失額, 0);
+  const totalCustomers = result.customerMaster.length;
+  const repeaters = result.customerMaster.filter(c => c.来場回数 >= 2).length;
+  const repeatRate = totalCustomers ? Math.round((repeaters / totalCustomers) * 1000) / 10 : 0;
+
+  const cards = [
+    { label: "公演数", value: es.length + "件" },
+    { label: "総申込件数", value: fmtNum(recordCount) + "件" },
+    { label: "ユニーク購入者数", value: fmtNum(totalCustomers) + "名" },
+    { label: "確定売上合計", value: "¥" + fmtNum(totalRevenue) },
+    { label: "機会損失額合計", value: "¥" + fmtNum(totalLoss), sub: "支払期限切れ・未発券分" },
+    { label: "リピーター比率", value: repeatRate + "%", sub: `${repeaters}名が複数公演に参加` },
+  ];
+  document.getElementById("kpiGrid").innerHTML = cards.map(c => `
+    <div class="kpi-card">
+      <div class="label">${c.label}</div>
+      <div class="value">${c.value}</div>
+      ${c.sub ? `<div class="sub">${c.sub}</div>` : ""}
+    </div>
+  `).join("");
+}
+
+function renderAll(records) {
+  const result = runFullAnalysis(records);
+  document.getElementById("emptyState").classList.add("hidden");
+  document.getElementById("dashboard").classList.remove("hidden");
+
+  updateKpis(result, records.length);
+
+  // 公演サマリー表
+  renderTable("eventSummaryTable", [
+    { key: "公演", label: "公演", fmt: v => shortEventLabel(v) },
+    { key: "申込件数", label: "申込件数", fmt: fmtNum },
+    { key: "ユニーク購入者数", label: "購入者数", fmt: fmtNum },
+    { key: "発券済み枚数", label: "発券枚数", fmt: fmtNum },
+    { key: "確定売上", label: "確定売上", fmt: v => "¥" + fmtNum(v) },
+    { key: "期限切れ_未発券件数", label: "期限切れ件数", fmt: fmtNum },
+    { key: "機会損失額", label: "機会損失額", fmt: v => "¥" + fmtNum(v) },
+    { key: "コンビニ払い期限切れ率", label: "コンビニ期限切れ率", fmt: v => v === null ? "-" : v + "%" },
+    { key: "平均年齢", label: "平均年齢", fmt: v => v === null ? "-" : v },
+  ], result.eventSummary);
+
+  // 売上推移
+  const evLabels = result.eventSummary.map(e => shortEventLabel(e.公演));
+  makeChart("chartRevenue", {
+    type: "bar",
+    data: {
+      labels: evLabels,
+      datasets: [
+        { label: "確定売上", data: result.eventSummary.map(e => e.確定売上), backgroundColor: CHART_COLORS[0] },
+        { label: "機会損失額", data: result.eventSummary.map(e => e.機会損失額), backgroundColor: CHART_COLORS[4] },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 確定売上 / 機会損失額" } } },
+  });
+
+  // 新規vsリピーター
+  makeChart("chartNewRepeat", {
+    type: "bar",
+    data: {
+      labels: result.newVsRepeat.map(e => shortEventLabel(e.公演)),
+      datasets: [
+        { label: "新規顧客数", data: result.newVsRepeat.map(e => e.新規顧客数), backgroundColor: CHART_COLORS[0], stack: "s" },
+        { label: "リピーター数", data: result.newVsRepeat.map(e => e.リピーター数), backgroundColor: CHART_COLORS[1], stack: "s" },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "公演別 新規顧客数 / リピーター数" } } },
+  });
+
+  // 出演者別集客
+  const topPerformers = result.performerSummary.slice(0, 10);
+  makeChart("chartPerformer", {
+    type: "bar",
+    data: {
+      labels: topPerformers.map(p => p.お目当て),
+      datasets: [{ label: "ユニーク集客数", data: topPerformers.map(p => p.ユニーク集客数), backgroundColor: CHART_COLORS[2] }],
+    },
+    options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "出演者別 ユニーク集客数(上位10)" } } },
+  });
+
+  renderTable("overlapTable", [
+    { key: "出演者A", label: "出演者A" },
+    { key: "出演者B", label: "出演者B" },
+    { key: "共通ファン数", label: "共通ファン数", fmt: fmtNum },
+    { key: "重複率", label: "重複率", fmt: v => v + "%" },
+  ], result.performerOverlap.slice(0, 30));
+
+  // 属性
+  makeChart("chartAge", {
+    type: "bar",
+    data: { labels: result.demographics.age.map(a => a.label), datasets: [{ label: "人数", data: result.demographics.age.map(a => a.count), backgroundColor: CHART_COLORS[0] }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "年齢層分布" } } },
+  });
+  makeChart("chartGender", {
+    type: "doughnut",
+    data: { labels: result.demographics.gender.map(g => g.label), datasets: [{ data: result.demographics.gender.map(g => g.count), backgroundColor: CHART_COLORS }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "性別分布" } } },
+  });
+  const topPref = result.demographics.prefecture.slice(0, 10);
+  makeChart("chartPref", {
+    type: "bar",
+    data: { labels: topPref.map(p => p.label), datasets: [{ label: "人数", data: topPref.map(p => p.count), backgroundColor: CHART_COLORS[3] }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "都道府県分布(上位10、未回答除く)" } } },
+  });
+  makeChart("chartTicketType", {
+    type: "bar",
+    data: { labels: result.demographics.ticketType.map(t => t.label), datasets: [{ label: "件数", data: result.demographics.ticketType.map(t => t.count), backgroundColor: CHART_COLORS[5] }] },
+    options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "券種分布" } } },
+  });
+
+  // 決済・タイミング
+  makeChart("chartPayment", {
+    type: "bar",
+    data: {
+      labels: result.payment.map(p => p.支払い方法),
+      datasets: [
+        { label: "発券済み", data: result.payment.map(p => p.発券済み), backgroundColor: CHART_COLORS[2], stack: "s" },
+        { label: "期限切れ/未発券", data: result.payment.map(p => p.期限切れ_未発券), backgroundColor: CHART_COLORS[4], stack: "s" },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "支払い方法別 発券状況" } } },
+  });
+  makeChart("chartDow", {
+    type: "bar",
+    data: { labels: result.timing.dow.map(d => d.label), datasets: [{ label: "申込件数", data: result.timing.dow.map(d => d.count), backgroundColor: CHART_COLORS[0] }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "曜日別 申込件数" } } },
+  });
+  makeChart("chartHour", {
+    type: "line",
+    data: { labels: result.timing.hour.map(h => h.label), datasets: [{ label: "申込件数", data: result.timing.hour.map(h => h.count), borderColor: CHART_COLORS[1], backgroundColor: CHART_COLORS[1] + "33", fill: true, tension: 0.3 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "時間帯別 申込件数" } } },
+  });
+  makeChart("chartSpeed", {
+    type: "bar",
+    data: {
+      labels: result.timing.speed.map(s => shortEventLabel(s.公演)),
+      datasets: [
+        { label: "10分以内(%)", data: result.timing.speed.map(s => s["10分以内"]), backgroundColor: CHART_COLORS[0] },
+        { label: "1時間以内(%)", data: result.timing.speed.map(s => s["1時間以内"]), backgroundColor: CHART_COLORS[1] },
+        { label: "1日以内(%)", data: result.timing.speed.map(s => s["1日以内"]), backgroundColor: CHART_COLORS[2] },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 申込の初速(発売開始からの経過時間別 累積割合)" } } },
+  });
+
+  // 顧客マスタ
+  renderTable("customerTable", [
+    { key: "表示名", label: "氏名" },
+    { key: "来場回数", label: "来場回数", fmt: fmtNum },
+    { key: "累計枚数", label: "累計枚数", fmt: fmtNum },
+    { key: "累計金額", label: "累計金額", fmt: v => "¥" + fmtNum(v) },
+    { key: "参加公演", label: "参加公演" },
+  ], result.customerMaster.slice(0, 30));
+
+  // 休眠顧客
+  renderTable("dormantTable", [
+    { key: "表示名", label: "氏名" },
+    { key: "来場回数", label: "過去の来場回数", fmt: fmtNum },
+    { key: "最終来場公演", label: "最終来場公演", fmt: v => shortEventLabel(v) },
+    { key: "最終来場日", label: "最終来場日" },
+  ], result.dormant.slice(0, 50));
+
+  // データ品質
+  renderTable("qualityPerformerTable", [
+    { key: "候補A", label: "候補A" },
+    { key: "候補B", label: "候補B" },
+    { key: "類似度", label: "類似度" },
+  ], result.quality.performerDupe);
+  renderTable("qualityTicketTable", [
+    { key: "候補A", label: "候補A" },
+    { key: "候補B", label: "候補B" },
+    { key: "類似度", label: "類似度" },
+  ], result.quality.ticketTypeDupe);
+
+  const m = result.quality.missing;
+  document.getElementById("missingSummary").innerHTML =
+    `Email欠損: <strong>${m.email}</strong>件 / 都道府県欠損: <strong>${m.prefecture}</strong>件 / 年齢欠損: <strong>${m.age}</strong>件 / 性別欠損: <strong>${m.gender}</strong>件`;
+}
+
+function updateFileList() {
+  const el = document.getElementById("fileList");
+  el.innerHTML = Array.from(loadedFiles).map(f => `<div>✓ ${f}</div>`).join("");
+}
+
+function handleFiles(fileList) {
+  const files = Array.from(fileList).filter(f => f.name.toLowerCase().endsWith(".csv"));
+  if (!files.length) return;
+
+  let pending = files.length;
+  files.forEach(file => {
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      encoding: "UTF-8",
+      complete: (res) => {
+        const recs = loadEventRows(res.data, file.name);
+        allRecords = allRecords.concat(recs);
+        loadedFiles.add(file.name);
+        pending--;
+        if (pending === 0) {
+          updateFileList();
+          renderAll(allRecords);
+        }
+      },
+      error: (err) => {
+        console.error("CSV parse error:", file.name, err);
+        pending--;
+      },
+    });
+  });
+}
+
+const uploadBox = document.getElementById("uploadBox");
+const fileInput = document.getElementById("fileInput");
+
+fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
+
+["dragenter", "dragover"].forEach(evt => {
+  uploadBox.addEventListener(evt, (e) => { e.preventDefault(); uploadBox.classList.add("dragover"); });
+});
+["dragleave", "drop"].forEach(evt => {
+  uploadBox.addEventListener(evt, (e) => { e.preventDefault(); uploadBox.classList.remove("dragover"); });
+});
+uploadBox.addEventListener("drop", (e) => {
+  if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+});
+</script>
+</body>
+</html>
