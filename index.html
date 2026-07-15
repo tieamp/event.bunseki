@@ -45,6 +45,20 @@ function similarityRatio(a, b) {
   return 1 - dist / maxLen;
 }
 
+// Dateオブジェクトを "ブラウザのローカル時刻" のまま YYYY-MM-DD / YYYY-MM-DD HH:MM 文字列にする。
+// toISOString()はUTCに変換してしまい、CSVの申込日時(タイムゾーン情報なし)とはズレるため使わない。
+function formatLocalDate(d) {
+  if (!d || isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function formatLocalDateTime(d) {
+  if (!d || isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function findSimilarNames(names, cutoff = 0.82) {
   const uniq = Array.from(new Set(names.filter((n) => n && n.trim()))).sort();
   const pairs = [];
@@ -153,7 +167,7 @@ function buildEventSummary(records) {
     return {
       公演: ev,
       会場: sub[0].event_venue,
-      開始日: startDate ? startDate.toISOString().slice(0, 10) : null,
+      開始日: formatLocalDate(startDate),
       申込件数: sub.length,
       ユニーク購入者数: new Set(sub.map((r) => r.customer_key)).size,
       発券済み枚数: sum(issued, (r) => r.申込枚数),
@@ -186,8 +200,8 @@ function buildCustomerMaster(records) {
       来場回数: events.size,
       累計枚数: sum(rows, (r) => r.申込枚数),
       累計金額: sum(rows, (r) => r.金額),
-      初回来場: dates.length ? dates[0].toISOString() : null,
-      最終来場: dates.length ? dates[dates.length - 1].toISOString() : null,
+      初回来場: dates.length ? formatLocalDateTime(dates[0]) : null,
+      最終来場: dates.length ? formatLocalDateTime(dates[dates.length - 1]) : null,
       参加公演: Array.from(events).sort().join(", "),
     });
   }
@@ -238,12 +252,76 @@ function buildDormantCustomers(records) {
       表示名: last.申込者本名,
       Email: last.申込者Email,
       最終来場公演: last.event,
-      最終来場日: last.申込日時 ? last.申込日時.toISOString().slice(0, 10) : null,
+      最終来場日: formatLocalDate(last.申込日時),
       来場回数: new Set(rows.map((r) => r.event)).size,
     });
   }
   result.sort((a, b) => b.来場回数 - a.来場回数 || (b.最終来場日 || "").localeCompare(a.最終来場日 || ""));
   return result;
+}
+
+// 過去Nヶ月(デフォルト3ヶ月)を基準にした「ファン離脱」「ファン獲得」分析。
+// 基準日は「データ内で最も新しい申込日時」を採用する(実行日ではなく、読み込んだCSVの最新日を「現在」とみなす)。
+// これにより、過去のCSVをまとめて読み込んでも常に安定した結果になる。
+function buildFanChurn(records, months = 3) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED && r.申込日時 && !isNaN(r.申込日時.getTime()));
+  if (issued.length === 0) {
+    return { referenceDate: null, cutoffDate: null, months, churned: [], acquired: [], activeCount: 0, totalCount: 0 };
+  }
+
+  const referenceDate = new Date(Math.max(...issued.map((r) => r.申込日時.getTime())));
+  const cutoffDate = new Date(referenceDate);
+  cutoffDate.setMonth(cutoffDate.getMonth() - months);
+
+  const byCustomer = groupBy(issued, (r) => r.customer_key);
+  const churned = [];
+  const acquired = [];
+  let activeCount = 0;
+
+  for (const [, rows] of byCustomer.entries()) {
+    const dates = rows.map((r) => r.申込日時).sort((a, b) => a - b);
+    const firstVisit = dates[0];
+    const lastVisit = dates[dates.length - 1];
+    const visitCount = new Set(rows.map((r) => r.event)).size;
+    const last = rows.find((r) => r.申込日時.getTime() === lastVisit.getTime()) || rows[0];
+
+    if (lastVisit < cutoffDate) {
+      // 直近Nヶ月に来場履歴がない = 離脱ファン
+      const monthsSince = Math.round(((referenceDate - lastVisit) / (1000 * 60 * 60 * 24 * 30.44)) * 10) / 10;
+      churned.push({
+        表示名: last.申込者本名,
+        Email: last.申込者Email,
+        来場回数: visitCount,
+        最終来場日: formatLocalDate(lastVisit),
+        経過月数: monthsSince,
+      });
+    } else {
+      activeCount++;
+    }
+
+    if (firstVisit >= cutoffDate) {
+      // 初回来場が直近Nヶ月以内 = 新規獲得ファン
+      acquired.push({
+        表示名: last.申込者本名,
+        Email: last.申込者Email,
+        初回来場日: formatLocalDate(firstVisit),
+        現在までの来場回数: visitCount,
+      });
+    }
+  }
+
+  churned.sort((a, b) => b.経過月数 - a.経過月数);
+  acquired.sort((a, b) => (b.初回来場日 || "").localeCompare(a.初回来場日 || ""));
+
+  return {
+    referenceDate: formatLocalDate(referenceDate),
+    cutoffDate: formatLocalDate(cutoffDate),
+    months,
+    churned,
+    acquired,
+    activeCount,
+    totalCount: byCustomer.size,
+  };
 }
 
 function buildPerformerSummary(records) {
@@ -413,6 +491,7 @@ function runFullAnalysis(records) {
     customerMaster: buildCustomerMaster(records),
     newVsRepeat: buildNewVsRepeat(records),
     dormant: buildDormantCustomers(records),
+    fanChurn: buildFanChurn(records),
     performerSummary: buildPerformerSummary(records),
     performerOverlap: buildPerformerOverlap(records),
     demographics: buildDemographics(records),
@@ -430,6 +509,7 @@ if (typeof module !== "undefined") {
     buildCustomerMaster,
     buildNewVsRepeat,
     buildDormantCustomers,
+    buildFanChurn,
     buildPerformerSummary,
     buildPerformerOverlap,
     buildDemographics,
@@ -563,6 +643,14 @@ if (typeof module !== "undefined") {
   .badge.warn { background: #fdeceb; color: var(--warn); }
   .badge.good { background: #e9f8ee; color: var(--good); }
 
+  .legend { margin-bottom: 14px; font-size: 12px; }
+  .legend summary { cursor: pointer; color: var(--primary); font-weight: 600; }
+  .legend dl { margin: 10px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; }
+  .legend dt { font-weight: 600; color: var(--primary-dark); white-space: nowrap; }
+  .legend dd { margin: 0; color: var(--muted); }
+
+  .subhead { font-size: 13px; margin: 0 0 8px; color: var(--primary-dark); }
+
   .hidden { display: none !important; }
   .empty-state { text-align: center; color: var(--muted); padding: 40px 0; font-size: 13px; }
   footer { text-align: center; color: var(--muted); font-size: 11px; padding: 20px 0 40px; }
@@ -596,6 +684,20 @@ if (typeof module !== "undefined") {
     <section class="panel">
       <h2>公演サマリー</h2>
       <div class="desc">公演ごとの申込件数・売上・機会損失・コンビニ払い期限切れ率など</div>
+      <details class="legend">
+        <summary>項目の説明を見る</summary>
+        <dl>
+          <dt>公演</dt><dd>会場名と、その公演の申込受付が始まった日時</dd>
+          <dt>申込件数</dt><dd>その公演への申込(注文)の総数。1件の申込で複数枚購入していても1件としてカウント</dd>
+          <dt>購入者数</dt><dd>申込者をメールアドレス等で名寄せしたユニーク人数</dd>
+          <dt>発券枚数</dt><dd>ステータスが「発券済み」になった申込の合計チケット枚数</dd>
+          <dt>確定売上</dt><dd>発券済み分の合計金額(チケット単価×枚数)。実際に入金が確定した売上</dd>
+          <dt>期限切れ件数</dt><dd>支払期限切れ、または未発券のまま終わった申込の件数</dd>
+          <dt>機会損失額</dt><dd>期限切れ・未発券だった分の合計金額。発券されていれば得られていたはずの売上</dd>
+          <dt>コンビニ期限切れ率</dt><dd>コンビニ払いを選んだ申込のうち、期限内に支払われず失効した割合</dd>
+          <dt>平均年齢</dt><dd>申込者のうち年齢が分かる人だけで計算した平均年齢</dd>
+        </dl>
+      </details>
       <div class="table-scroll"><table id="eventSummaryTable"></table></div>
     </section>
 
@@ -653,6 +755,22 @@ if (typeof module !== "undefined") {
       <h2>休眠顧客</h2>
       <div class="desc">過去には来場歴があるが、直近公演には来ていない顧客</div>
       <div class="table-scroll"><table id="dormantTable"></table></div>
+    </section>
+
+    <section class="panel">
+      <h2>ファンの離脱・獲得(過去3か月ベース)</h2>
+      <div class="desc" id="fanChurnDesc">データ内で最も新しい申込日を基準に、直近3か月の来場有無で「離脱」「新規獲得」を判定します</div>
+      <div class="kpi-grid" id="fanChurnKpis"></div>
+      <div class="chart-grid">
+        <div>
+          <h3 class="subhead">離脱ファン(過去3か月来場なし)</h3>
+          <div class="table-scroll" style="max-height:320px"><table id="churnedTable"></table></div>
+        </div>
+        <div>
+          <h3 class="subhead">新規獲得ファン(過去3か月で初来場)</h3>
+          <div class="table-scroll" style="max-height:320px"><table id="acquiredTable"></table></div>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
@@ -737,15 +855,33 @@ function updateKpis(result, recordCount) {
   `).join("");
 }
 
+function safe(label, fn) {
+  try {
+    fn();
+  } catch (e) {
+    console.error(`[${label}] の描画に失敗しました:`, e);
+    const el = document.getElementById(label);
+    if (el && el.tagName === "CANVAS") {
+      const box = el.closest(".chart-box");
+      if (box) {
+        const msg = document.createElement("div");
+        msg.style.cssText = "font-size:11px;color:#d1453b;padding:8px;";
+        msg.textContent = `このグラフの描画でエラーが発生しました(${e.message || e})`;
+        box.appendChild(msg);
+      }
+    }
+  }
+}
+
 function renderAll(records) {
   const result = runFullAnalysis(records);
   document.getElementById("emptyState").classList.add("hidden");
   document.getElementById("dashboard").classList.remove("hidden");
 
-  updateKpis(result, records.length);
+  safe("kpi", () => updateKpis(result, records.length));
 
   // 公演サマリー表
-  renderTable("eventSummaryTable", [
+  safe("eventSummaryTable", () => renderTable("eventSummaryTable", [
     { key: "公演", label: "公演", fmt: v => shortEventLabel(v) },
     { key: "申込件数", label: "申込件数", fmt: fmtNum },
     { key: "ユニーク購入者数", label: "購入者数", fmt: fmtNum },
@@ -755,78 +891,86 @@ function renderAll(records) {
     { key: "機会損失額", label: "機会損失額", fmt: v => "¥" + fmtNum(v) },
     { key: "コンビニ払い期限切れ率", label: "コンビニ期限切れ率", fmt: v => v === null ? "-" : v + "%" },
     { key: "平均年齢", label: "平均年齢", fmt: v => v === null ? "-" : v },
-  ], result.eventSummary);
+  ], result.eventSummary));
 
   // 売上推移
-  const evLabels = result.eventSummary.map(e => shortEventLabel(e.公演));
-  makeChart("chartRevenue", {
-    type: "bar",
-    data: {
-      labels: evLabels,
-      datasets: [
-        { label: "確定売上", data: result.eventSummary.map(e => e.確定売上), backgroundColor: CHART_COLORS[0] },
-        { label: "機会損失額", data: result.eventSummary.map(e => e.機会損失額), backgroundColor: CHART_COLORS[4] },
-      ],
-    },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 確定売上 / 機会損失額" } } },
+  safe("chartRevenue", () => {
+    const evLabels = result.eventSummary.map(e => shortEventLabel(e.公演));
+    makeChart("chartRevenue", {
+      type: "bar",
+      data: {
+        labels: evLabels,
+        datasets: [
+          { label: "確定売上", data: result.eventSummary.map(e => e.確定売上), backgroundColor: CHART_COLORS[0] },
+          { label: "機会損失額", data: result.eventSummary.map(e => e.機会損失額), backgroundColor: CHART_COLORS[4] },
+        ],
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 確定売上 / 機会損失額" } } },
+    });
   });
 
   // 新規vsリピーター
-  makeChart("chartNewRepeat", {
-    type: "bar",
-    data: {
-      labels: result.newVsRepeat.map(e => shortEventLabel(e.公演)),
-      datasets: [
-        { label: "新規顧客数", data: result.newVsRepeat.map(e => e.新規顧客数), backgroundColor: CHART_COLORS[0], stack: "s" },
-        { label: "リピーター数", data: result.newVsRepeat.map(e => e.リピーター数), backgroundColor: CHART_COLORS[1], stack: "s" },
-      ],
-    },
-    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "公演別 新規顧客数 / リピーター数" } } },
+  safe("chartNewRepeat", () => {
+    makeChart("chartNewRepeat", {
+      type: "bar",
+      data: {
+        labels: result.newVsRepeat.map(e => shortEventLabel(e.公演)),
+        datasets: [
+          { label: "新規顧客数", data: result.newVsRepeat.map(e => e.新規顧客数), backgroundColor: CHART_COLORS[0], stack: "s" },
+          { label: "リピーター数", data: result.newVsRepeat.map(e => e.リピーター数), backgroundColor: CHART_COLORS[1], stack: "s" },
+        ],
+      },
+      options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "公演別 新規顧客数 / リピーター数" } } },
+    });
   });
 
   // 出演者別集客
-  const topPerformers = result.performerSummary.slice(0, 10);
-  makeChart("chartPerformer", {
-    type: "bar",
-    data: {
-      labels: topPerformers.map(p => p.お目当て),
-      datasets: [{ label: "ユニーク集客数", data: topPerformers.map(p => p.ユニーク集客数), backgroundColor: CHART_COLORS[2] }],
-    },
-    options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "出演者別 ユニーク集客数(上位10)" } } },
+  safe("chartPerformer", () => {
+    const topPerformers = result.performerSummary.slice(0, 10);
+    makeChart("chartPerformer", {
+      type: "bar",
+      data: {
+        labels: topPerformers.map(p => p.お目当て),
+        datasets: [{ label: "ユニーク集客数", data: topPerformers.map(p => p.ユニーク集客数), backgroundColor: CHART_COLORS[2] }],
+      },
+      options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "出演者別 ユニーク集客数(上位10)" } } },
+    });
   });
 
-  renderTable("overlapTable", [
+  safe("overlapTable", () => renderTable("overlapTable", [
     { key: "出演者A", label: "出演者A" },
     { key: "出演者B", label: "出演者B" },
     { key: "共通ファン数", label: "共通ファン数", fmt: fmtNum },
     { key: "重複率", label: "重複率", fmt: v => v + "%" },
-  ], result.performerOverlap.slice(0, 30));
+  ], result.performerOverlap.slice(0, 30)));
 
   // 属性
-  makeChart("chartAge", {
+  safe("chartAge", () => makeChart("chartAge", {
     type: "bar",
     data: { labels: result.demographics.age.map(a => a.label), datasets: [{ label: "人数", data: result.demographics.age.map(a => a.count), backgroundColor: CHART_COLORS[0] }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "年齢層分布" } } },
-  });
-  makeChart("chartGender", {
+  }));
+  safe("chartGender", () => makeChart("chartGender", {
     type: "doughnut",
     data: { labels: result.demographics.gender.map(g => g.label), datasets: [{ data: result.demographics.gender.map(g => g.count), backgroundColor: CHART_COLORS }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "性別分布" } } },
+  }));
+  safe("chartPref", () => {
+    const topPref = result.demographics.prefecture.slice(0, 10);
+    makeChart("chartPref", {
+      type: "bar",
+      data: { labels: topPref.map(p => p.label), datasets: [{ label: "人数", data: topPref.map(p => p.count), backgroundColor: CHART_COLORS[3] }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "都道府県分布(上位10、未回答除く)" } } },
+    });
   });
-  const topPref = result.demographics.prefecture.slice(0, 10);
-  makeChart("chartPref", {
-    type: "bar",
-    data: { labels: topPref.map(p => p.label), datasets: [{ label: "人数", data: topPref.map(p => p.count), backgroundColor: CHART_COLORS[3] }] },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "都道府県分布(上位10、未回答除く)" } } },
-  });
-  makeChart("chartTicketType", {
+  safe("chartTicketType", () => makeChart("chartTicketType", {
     type: "bar",
     data: { labels: result.demographics.ticketType.map(t => t.label), datasets: [{ label: "件数", data: result.demographics.ticketType.map(t => t.count), backgroundColor: CHART_COLORS[5] }] },
     options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "券種分布" } } },
-  });
+  }));
 
   // 決済・タイミング
-  makeChart("chartPayment", {
+  safe("chartPayment", () => makeChart("chartPayment", {
     type: "bar",
     data: {
       labels: result.payment.map(p => p.支払い方法),
@@ -836,18 +980,18 @@ function renderAll(records) {
       ],
     },
     options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "支払い方法別 発券状況" } } },
-  });
-  makeChart("chartDow", {
+  }));
+  safe("chartDow", () => makeChart("chartDow", {
     type: "bar",
     data: { labels: result.timing.dow.map(d => d.label), datasets: [{ label: "申込件数", data: result.timing.dow.map(d => d.count), backgroundColor: CHART_COLORS[0] }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "曜日別 申込件数" } } },
-  });
-  makeChart("chartHour", {
+  }));
+  safe("chartHour", () => makeChart("chartHour", {
     type: "line",
     data: { labels: result.timing.hour.map(h => h.label), datasets: [{ label: "申込件数", data: result.timing.hour.map(h => h.count), borderColor: CHART_COLORS[1], backgroundColor: CHART_COLORS[1] + "33", fill: true, tension: 0.3 }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "時間帯別 申込件数" } } },
-  });
-  makeChart("chartSpeed", {
+  }));
+  safe("chartSpeed", () => makeChart("chartSpeed", {
     type: "bar",
     data: {
       labels: result.timing.speed.map(s => shortEventLabel(s.公演)),
@@ -858,40 +1002,80 @@ function renderAll(records) {
       ],
     },
     options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 申込の初速(発売開始からの経過時間別 累積割合)" } } },
-  });
+  }));
 
   // 顧客マスタ
-  renderTable("customerTable", [
+  safe("customerTable", () => renderTable("customerTable", [
     { key: "表示名", label: "氏名" },
     { key: "来場回数", label: "来場回数", fmt: fmtNum },
     { key: "累計枚数", label: "累計枚数", fmt: fmtNum },
     { key: "累計金額", label: "累計金額", fmt: v => "¥" + fmtNum(v) },
     { key: "参加公演", label: "参加公演" },
-  ], result.customerMaster.slice(0, 30));
+  ], result.customerMaster.slice(0, 30)));
 
   // 休眠顧客
-  renderTable("dormantTable", [
+  safe("dormantTable", () => renderTable("dormantTable", [
     { key: "表示名", label: "氏名" },
     { key: "来場回数", label: "過去の来場回数", fmt: fmtNum },
     { key: "最終来場公演", label: "最終来場公演", fmt: v => shortEventLabel(v) },
     { key: "最終来場日", label: "最終来場日" },
-  ], result.dormant.slice(0, 50));
+  ], result.dormant.slice(0, 50)));
+
+  // ファンの離脱・獲得(過去3か月ベース)
+  safe("fanChurn", () => {
+    const fc = result.fanChurn;
+    const netChange = fc.acquired.length - fc.churned.length;
+    const descEl = document.getElementById("fanChurnDesc");
+    if (descEl) {
+      descEl.textContent = fc.referenceDate
+        ? `分析基準日: ${fc.referenceDate}(データ内で最新の申込日) / 直近${fc.months}か月の区切り: ${fc.cutoffDate}以降`
+        : "日付データが不足しているため分析できません";
+    }
+    const cards = [
+      { label: "離脱ファン数", value: fmtNum(fc.churned.length) + "名", sub: `直近${fc.months}か月来場なし` },
+      { label: "新規獲得ファン数", value: fmtNum(fc.acquired.length) + "名", sub: `直近${fc.months}か月で初来場` },
+      { label: "アクティブファン数", value: fmtNum(fc.activeCount) + "名", sub: `直近${fc.months}か月以内に来場あり` },
+      { label: "純増減", value: (netChange >= 0 ? "+" : "") + fmtNum(netChange) + "名", sub: "獲得 − 離脱" },
+    ];
+    document.getElementById("fanChurnKpis").innerHTML = cards.map(c => `
+      <div class="kpi-card">
+        <div class="label">${c.label}</div>
+        <div class="value">${c.value}</div>
+        <div class="sub">${c.sub}</div>
+      </div>
+    `).join("");
+
+    renderTable("churnedTable", [
+      { key: "表示名", label: "氏名" },
+      { key: "来場回数", label: "累計来場回数", fmt: fmtNum },
+      { key: "最終来場日", label: "最終来場日" },
+      { key: "経過月数", label: "経過月数", fmt: v => v + "か月" },
+    ], fc.churned.slice(0, 50));
+
+    renderTable("acquiredTable", [
+      { key: "表示名", label: "氏名" },
+      { key: "初回来場日", label: "初回来場日" },
+      { key: "現在までの来場回数", label: "現在までの来場回数", fmt: fmtNum },
+    ], fc.acquired.slice(0, 50));
+  });
 
   // データ品質
-  renderTable("qualityPerformerTable", [
+  safe("qualityPerformerTable", () => renderTable("qualityPerformerTable", [
     { key: "候補A", label: "候補A" },
     { key: "候補B", label: "候補B" },
     { key: "類似度", label: "類似度" },
-  ], result.quality.performerDupe);
-  renderTable("qualityTicketTable", [
+  ], result.quality.performerDupe));
+  safe("qualityTicketTable", () => renderTable("qualityTicketTable", [
     { key: "候補A", label: "候補A" },
     { key: "候補B", label: "候補B" },
     { key: "類似度", label: "類似度" },
-  ], result.quality.ticketTypeDupe);
+  ], result.quality.ticketTypeDupe));
 
-  const m = result.quality.missing;
-  document.getElementById("missingSummary").innerHTML =
-    `Email欠損: <strong>${m.email}</strong>件 / 都道府県欠損: <strong>${m.prefecture}</strong>件 / 年齢欠損: <strong>${m.age}</strong>件 / 性別欠損: <strong>${m.gender}</strong>件`;
+  safe("missingSummary", () => {
+    const m = result.quality.missing;
+    document.getElementById("missingSummary").innerHTML =
+      `Email欠損: <strong>${m.email}</strong>件 / 都道府県欠損: <strong>${m.prefecture}</strong>件 / 年齢欠損: <strong>${m.age}</strong>件 / 性別欠損: <strong>${m.gender}</strong>件`;
+  });
 }
 
 function updateFileList() {
