@@ -437,15 +437,32 @@ function buildTimingAnalysis(records) {
   const byEvent = groupBy(withDate, (r) => r.event);
   const speed = order.map((ev) => {
     const sub = byEvent.get(ev);
-    const start = Math.min(...sub.map((r) => r.申込日時.getTime()));
+    const dates = sub.map((r) => r.申込日時).sort((a, b) => a - b);
+    const start = dates[0].getTime();
     const total = sub.length;
     const within = (minutes) => sub.filter((r) => (r.申込日時.getTime() - start) / 60000 <= minutes).length;
+
+    // 開催日目安(=最終申込日)を基準にした「前日」「当日」の申込集中度。
+    // 発売開始からの経過時間(初速)とは逆に、公演直前にどれだけ駆け込み申込があったかを見る指標。
+    const eventDay = dates[dates.length - 1];
+    const eventDayStr = formatLocalDate(eventDay);
+    const prevDay = new Date(eventDay);
+    prevDay.setDate(prevDay.getDate() - 1);
+    const prevDayStr = formatLocalDate(prevDay);
+    const countOnDay = (dayStr) => sub.filter((r) => formatLocalDate(r.申込日時) === dayStr).length;
+    const dayBeforeCount = countOnDay(prevDayStr);
+    const dayOfCount = countOnDay(eventDayStr);
+
     return {
       公演: ev,
       申込件数: total,
       "10分以内": total ? Math.round((within(10) / total) * 1000) / 10 : 0,
       "1時間以内": total ? Math.round((within(60) / total) * 1000) / 10 : 0,
       "1日以内": total ? Math.round((within(1440) / total) * 1000) / 10 : 0,
+      前日件数: dayBeforeCount,
+      前日率: total ? Math.round((dayBeforeCount / total) * 1000) / 10 : 0,
+      当日件数: dayOfCount,
+      当日率: total ? Math.round((dayOfCount / total) * 1000) / 10 : 0,
     };
   });
 
@@ -840,12 +857,16 @@ if (typeof module !== "undefined") {
 
     <section class="panel">
       <h2>決済方法・申込タイミング</h2>
-      <div class="desc">支払い方法別の期限切れ率、曜日・時間帯別の申込集中度、発売開始からの初速</div>
+      <div class="desc">支払い方法別の期限切れ率、曜日・時間帯別の申込集中度、発売開始からの初速、開催前日・当日の駆け込み申込</div>
       <div class="chart-grid">
         <div class="chart-box"><canvas id="chartPayment"></canvas></div>
         <div class="chart-box"><canvas id="chartDow"></canvas></div>
         <div class="chart-box"><canvas id="chartHour"></canvas></div>
         <div class="chart-box"><canvas id="chartSpeed"></canvas></div>
+      </div>
+      <h3 class="subhead" style="margin-top:18px">公演別 前日・当日の申込件数(開催日目安基準)</h3>
+      <div class="table-scroll" style="max-height:280px">
+        <table id="timingSpeedDetailTable"></table>
       </div>
     </section>
 
@@ -1130,10 +1151,21 @@ function renderAll(records) {
         { label: "10分以内(%)", data: result.timing.speed.map(s => s["10分以内"]), backgroundColor: CHART_COLORS[0] },
         { label: "1時間以内(%)", data: result.timing.speed.map(s => s["1時間以内"]), backgroundColor: CHART_COLORS[1] },
         { label: "1日以内(%)", data: result.timing.speed.map(s => s["1日以内"]), backgroundColor: CHART_COLORS[2] },
+        { label: "前日(%)", data: result.timing.speed.map(s => s.前日率), backgroundColor: CHART_COLORS[4] },
+        { label: "当日(%)", data: result.timing.speed.map(s => s.当日率), backgroundColor: CHART_COLORS[9] },
       ],
     },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 申込の初速(発売開始からの経過時間別 累積割合)" } } },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 申込の初速(発売開始からの経過時間)と前日・当日の駆け込み率" } } },
   }));
+
+  safe("timingSpeedDetailTable", () => renderTable("timingSpeedDetailTable", [
+    { key: "公演", label: "公演", fmt: v => shortEventLabel(v) },
+    { key: "申込件数", label: "申込件数(合計)", fmt: fmtNum },
+    { key: "前日件数", label: "前日の申込件数", fmt: fmtNum },
+    { key: "前日率", label: "前日の割合", fmt: v => v + "%" },
+    { key: "当日件数", label: "当日の申込件数", fmt: fmtNum },
+    { key: "当日率", label: "当日の割合", fmt: v => v + "%" },
+  ], result.timing.speed));
 
   // 顧客マスタ
   safe("customerTable", () => renderTable("customerTable", [
