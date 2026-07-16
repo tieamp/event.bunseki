@@ -111,28 +111,32 @@ function normalizeRow(row, venue, dateLabel, sourceFile) {
 
 // PapaParseの結果(rows: オブジェクト配列)から正規化済みレコード配列を作る
 function loadEventRows(rows, sourceFile) {
+  // CSVには公演(ライブ)当日の日付が含まれていないため、
+  // 「その公演で最後にチケット申込があった日時」(=チケット販売終了に近いタイミング)を
+  // 開催日の目安(イベントキー)として使う。受付が始まった日時より、終了に近い日時のほうが
+  // 実際の公演日に近いという想定。
   const withDates = rows
     .map((r) => (r["申込日時"] ? new Date(r["申込日時"].replace(" ", "T")) : null))
     .filter((d) => d && !isNaN(d.getTime()));
-  const start = withDates.length ? new Date(Math.min(...withDates.map((d) => d.getTime()))) : null;
+  const latest = withDates.length ? new Date(Math.max(...withDates.map((d) => d.getTime()))) : null;
   const venue = (rows.find((r) => normStr(r["会場名/公演名"]))?.["会場名/公演名"] || sourceFile).trim();
 
   const pad = (n) => String(n).padStart(2, "0");
-  const dateLabel = start
-    ? `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}_${pad(start.getHours())}${pad(start.getMinutes())}`
+  const dateLabel = latest
+    ? `${latest.getFullYear()}-${pad(latest.getMonth() + 1)}-${pad(latest.getDate())}_${pad(latest.getHours())}${pad(latest.getMinutes())}`
     : sourceFile;
 
   return rows.map((r) => normalizeRow(r, venue, dateLabel, sourceFile));
 }
 
 function eventOrder(records) {
-  const starts = new Map();
+  const latestByEvent = new Map();
   for (const r of records) {
     if (!r.申込日時) continue;
     const t = r.申込日時.getTime();
-    if (!starts.has(r.event) || t < starts.get(r.event)) starts.set(r.event, t);
+    if (!latestByEvent.has(r.event) || t > latestByEvent.get(r.event)) latestByEvent.set(r.event, t);
   }
-  return Array.from(starts.entries())
+  return Array.from(latestByEvent.entries())
     .sort((a, b) => a[1] - b[1])
     .map(([ev]) => ev);
 }
@@ -159,14 +163,15 @@ function buildEventSummary(records) {
     const issued = sub.filter((r) => r.ステータス === STATUS_ISSUED);
     const expired = sub.filter((r) => r.ステータス !== STATUS_ISSUED);
     const cvs = sub.filter((r) => r.支払い方法 === "コンビニ");
-    const startDate = sub
-      .map((r) => r.申込日時)
-      .filter(Boolean)
-      .sort((a, b) => a - b)[0];
+    const allDates = sub.map((r) => r.申込日時).filter(Boolean).sort((a, b) => a - b);
+    const startDate = allDates[0];
+    const endDate = allDates[allDates.length - 1];
     return {
       公演: ev,
       会場: sub[0].event_venue,
+      開催日目安: formatLocalDate(endDate),
       申込開始日時: formatLocalDateTime(startDate),
+      申込終了日時: formatLocalDateTime(endDate),
       申込件数: sub.length,
       ユニーク購入者数: new Set(sub.map((r) => r.customer_key)).size,
       発券済み枚数: sum(issued, (r) => r.申込枚数),
@@ -597,13 +602,39 @@ if (typeof module !== "undefined") {
   }
   .link-btn:hover { color: var(--primary-dark); }
   .event-checkbox-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 16px;
     margin-top: 10px;
-    max-height: 220px;
+    max-height: 420px;
     overflow-y: auto;
     padding: 4px;
+  }
+  .month-group {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 10px;
+    background: #fbfcfe;
+  }
+  .month-group summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    cursor: pointer;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--primary-dark);
+    list-style: none;
+  }
+  .month-group summary::-webkit-details-marker { display: none; }
+  .month-group summary::before { content: "▸ "; color: var(--muted); }
+  .month-group[open] summary::before { content: "▾ "; }
+  .month-actions { display: flex; gap: 12px; font-weight: 400; }
+  .month-events {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 0 14px 12px;
   }
   .event-check-row {
     display: flex;
@@ -749,13 +780,15 @@ if (typeof module !== "undefined") {
       <div class="desc">公演ごとの申込件数・売上・機会損失など</div>
       <div class="date-note">
         <strong>日付・時間について:</strong> アップロードするCSVには公演(ライブ)当日の日付は含まれておらず、「申込日時」(チケット申込・購入が行われた日時)しか記録されていません。
-        そのため「公演」列・「申込開始日時」列に表示される日時は<strong>チケット申込の受付が始まった日時</strong>であり、実際の公演当日の日付とは異なります(通常、公演当日より前に申込が始まります)。
+        そのため当ツールでは、その公演で<strong>最後にチケット申込があった日時</strong>(チケット販売終了に近いタイミング)を「開催日の目安」として使用しています。実際の公演当日とは前後する場合があります。
       </div>
       <details class="legend">
         <summary>項目の説明を見る</summary>
         <dl>
-          <dt>公演</dt><dd>会場名と、その公演のチケット申込受付が始まった日時(公演当日の日付ではありません)</dd>
+          <dt>公演</dt><dd>会場名と、その公演で最後にチケット申込があった日時(開催日の目安として使用。公演当日そのものではありません)</dd>
+          <dt>開催日目安</dt><dd>その公演で最後にチケット申込があった日付。チケット販売終了に近いタイミングであり、実際の公演日の目安として使用</dd>
           <dt>申込開始日時</dt><dd>その公演でチケット申込の受付が最初に行われた日時(データ内の最も古い申込日時)</dd>
+          <dt>申込終了日時</dt><dd>その公演で最後にチケット申込があった日時(データ内の最も新しい申込日時。「開催日目安」の元になった日時)</dd>
           <dt>申込件数</dt><dd>その公演への申込(注文)の総数。1件の申込で複数枚購入していても1件としてカウント</dd>
           <dt>購入者数</dt><dd>申込者をメールアドレス等で名寄せしたユニーク人数</dd>
           <dt>発券枚数</dt><dd>ステータスが「発券済み」になった申込の合計チケット枚数</dd>
@@ -959,7 +992,9 @@ function renderAll(records) {
   // 公演サマリー表
   safe("eventSummaryTable", () => renderTable("eventSummaryTable", [
     { key: "公演", label: "会場", fmt: v => (v.match(/^(.*)_(\d{4}-\d{2}-\d{2}_\d{4})$/) || [null, v])[1] },
+    { key: "開催日目安", label: "開催日目安" },
     { key: "申込開始日時", label: "申込開始日時" },
+    { key: "申込終了日時", label: "申込終了日時" },
     { key: "申込件数", label: "申込件数", fmt: fmtNum },
     { key: "ユニーク購入者数", label: "購入者数", fmt: fmtNum },
     { key: "発券済み枚数", label: "発券枚数", fmt: fmtNum },
@@ -1277,6 +1312,19 @@ function updateFileList() {
   }
 }
 
+// イベントキー "会場_YYYY-MM-DD_HHMM" から "YYYY-MM" (開催月)を取り出す。
+// 開催日目安(=最終申込日時)ベースの月なので、loadEventRows/eventOrderと一致する。
+function eventMonthKey(ev) {
+  const m = ev.match(/(\d{4})-(\d{2})-\d{2}_\d{4}$/);
+  return m ? `${m[1]}-${m[2]}` : "不明";
+}
+
+function monthLabel(monthKey) {
+  if (monthKey === "不明") return "開催月不明";
+  const [y, mo] = monthKey.split("-");
+  return `${y}年${parseInt(mo, 10)}月`;
+}
+
 function updateEventSelector() {
   const all = [].concat(...filesData.values());
   const events = eventOrder(all); // 開催順(古い順)
@@ -1306,12 +1354,34 @@ function updateEventSelector() {
   }
   section.classList.remove("hidden");
 
-  list.innerHTML = events.map(ev => {
-    const checked = selectedEvents.has(ev) ? "checked" : "";
-    return `<label class="event-check-row">
-      <input type="checkbox" class="event-checkbox" data-event="${escapeHtml(ev)}" ${checked}>
-      ${escapeHtml(shortEventLabel(ev))}
-    </label>`;
+  // 開催月ごとにグループ化(新しい月が上に来るように降順で並べる)
+  const monthGroups = new Map(); // monthKey -> event[]
+  events.forEach(ev => {
+    const mk = eventMonthKey(ev);
+    if (!monthGroups.has(mk)) monthGroups.set(mk, []);
+    monthGroups.get(mk).push(ev);
+  });
+  const sortedMonthKeys = Array.from(monthGroups.keys()).sort().reverse();
+
+  list.innerHTML = sortedMonthKeys.map((mk, idx) => {
+    const evs = monthGroups.get(mk).slice().reverse(); // 各月内も新しい順
+    const openAttr = idx < 2 ? "open" : ""; // 直近2か月分は開いた状態で表示
+    const rows = evs.map(ev => `
+      <label class="event-check-row">
+        <input type="checkbox" class="event-checkbox" data-event="${escapeHtml(ev)}" ${selectedEvents.has(ev) ? "checked" : ""}>
+        ${escapeHtml(shortEventLabel(ev))}
+      </label>`).join("");
+    return `
+      <details class="month-group" ${openAttr}>
+        <summary>
+          <span>${escapeHtml(monthLabel(mk))}(${evs.length}件)</span>
+          <span class="month-actions">
+            <button type="button" class="link-btn month-select-all" data-month="${escapeHtml(mk)}">この月を全選択</button>
+            <button type="button" class="link-btn month-select-none" data-month="${escapeHtml(mk)}">この月を全解除</button>
+          </span>
+        </summary>
+        <div class="month-events">${rows}</div>
+      </details>`;
   }).join("");
 
   list.querySelectorAll(".event-checkbox").forEach(cb => {
@@ -1319,6 +1389,25 @@ function updateEventSelector() {
       const ev = cb.dataset.event;
       if (cb.checked) selectedEvents.add(ev);
       else selectedEvents.delete(ev);
+      applyFilterAndRender();
+    });
+  });
+
+  list.querySelectorAll(".month-select-all").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      (monthGroups.get(btn.dataset.month) || []).forEach(ev => selectedEvents.add(ev));
+      updateEventSelector();
+      applyFilterAndRender();
+    });
+  });
+  list.querySelectorAll(".month-select-none").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      (monthGroups.get(btn.dataset.month) || []).forEach(ev => selectedEvents.delete(ev));
+      updateEventSelector();
       applyFilterAndRender();
     });
   });
