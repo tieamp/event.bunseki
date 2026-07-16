@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>主催ライブ チケット購入者分析ダッシュボード</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script>
 // 主催ライブ チケット購入者分析ロジック (ブラウザ / Node 共用)
 // analyze.py の集計ロジックをJavaScriptに移植したもの。
@@ -329,11 +329,16 @@ function buildPerformerSummary(records) {
   const byPerformer = groupBy(issued, (r) => r.お目当て);
   const rows = [];
   for (const [name, sub] of byPerformer.entries()) {
+    const uniqueFans = new Set(sub.map((r) => r.customer_key)).size;
+    const eventCount = new Set(sub.map((r) => r.event)).size;
     rows.push({
       お目当て: name,
       申込件数: sub.length,
-      ユニーク集客数: new Set(sub.map((r) => r.customer_key)).size,
-      出演公演数: new Set(sub.map((r) => r.event)).size,
+      ユニーク集客数: uniqueFans,
+      出演公演数: eventCount,
+      // 1公演あたりの平均動員数(ユニーク集客数 ÷ 出演公演数)。
+      // 出演回数が少なくても毎回よく集客している出演者を見つけるための指標。
+      公演あたり平均動員数: eventCount ? Math.round((uniqueFans / eventCount) * 10) / 10 : 0,
     });
   }
   rows.sort((a, b) => b.申込件数 - a.申込件数);
@@ -576,6 +581,19 @@ if (typeof module !== "undefined") {
   .file-list { margin-top: 14px; font-size: 12px; color: var(--muted); text-align: left; max-width: 520px; margin-left: auto; margin-right: auto; }
   .file-list div { padding: 2px 0; }
 
+  .lib-error {
+    display: none;
+    font-size: 13px;
+    color: #7a1f1a;
+    background: #fdeceb;
+    border: 1px solid #f3b9b4;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+  }
+  .lib-error.show { display: block; }
+  .lib-error strong { display: block; margin-bottom: 4px; }
+
   .privacy-note {
     font-size: 12px;
     color: var(--muted);
@@ -664,6 +682,10 @@ if (typeof module !== "undefined") {
 </header>
 
 <main>
+  <div class="lib-error" id="libError">
+    <strong>グラフ用ライブラリ(Chart.js / PapaParse)の読み込みに失敗しました</strong>
+    ネットワーク環境や広告ブロッカー、社内ファイアウォールなどでCDN(cdn.jsdelivr.net)がブロックされている可能性があります。別のネットワークやブラウザ、シークレットウィンドウでお試しいただくか、時間をおいて再度アクセスしてみてください。
+  </div>
   <div class="upload-box" id="uploadBox">
     <p><strong>ここにCSVファイルをドラッグ&ドロップ</strong>、またはボタンから選択してください(複数選択可)</p>
     <label class="upload-btn" for="fileInput">CSVファイルを選択</label>
@@ -712,14 +734,18 @@ if (typeof module !== "undefined") {
 
     <section class="panel">
       <h2>出演者(お目当て)分析</h2>
-      <div class="desc">申込件数上位10組の集客力と、公演をまたいだファン層の重複</div>
+      <div class="desc">申込件数上位10組の集客力(累計)と、1公演あたりの平均動員数、公演をまたいだファン層の重複</div>
       <div class="chart-grid">
         <div class="chart-box tall"><canvas id="chartPerformer"></canvas></div>
-        <div>
-          <div class="table-scroll" style="max-height:360px">
-            <table id="overlapTable"></table>
-          </div>
-        </div>
+        <div class="chart-box tall"><canvas id="chartPerformerAvg"></canvas></div>
+      </div>
+      <h3 class="subhead" style="margin-top:18px">出演者別サマリー</h3>
+      <div class="table-scroll" style="max-height:320px">
+        <table id="performerSummaryTable"></table>
+      </div>
+      <h3 class="subhead" style="margin-top:18px">出演者間のファン層重複</h3>
+      <div class="table-scroll" style="max-height:320px">
+        <table id="overlapTable"></table>
       </div>
     </section>
 
@@ -933,9 +959,29 @@ function renderAll(records) {
         labels: topPerformers.map(p => p.お目当て),
         datasets: [{ label: "ユニーク集客数", data: topPerformers.map(p => p.ユニーク集客数), backgroundColor: CHART_COLORS[2] }],
       },
-      options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "出演者別 ユニーク集客数(上位10)" } } },
+      options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "出演者別 累計ユニーク集客数(上位10)" } } },
     });
   });
+
+  safe("chartPerformerAvg", () => {
+    const topByAvg = result.performerSummary.slice().sort((a, b) => b.公演あたり平均動員数 - a.公演あたり平均動員数).slice(0, 10);
+    makeChart("chartPerformerAvg", {
+      type: "bar",
+      data: {
+        labels: topByAvg.map(p => `${p.お目当て}(${p.出演公演数}公演)`),
+        datasets: [{ label: "1公演あたり平均動員数", data: topByAvg.map(p => p.公演あたり平均動員数), backgroundColor: CHART_COLORS[6] }],
+      },
+      options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "出演者別 1公演あたり平均動員数(上位10)" } } },
+    });
+  });
+
+  safe("performerSummaryTable", () => renderTable("performerSummaryTable", [
+    { key: "お目当て", label: "出演者" },
+    { key: "出演公演数", label: "出演公演数", fmt: fmtNum },
+    { key: "ユニーク集客数", label: "累計ユニーク集客数", fmt: fmtNum },
+    { key: "公演あたり平均動員数", label: "1公演あたり平均動員数" },
+    { key: "申込件数", label: "申込件数(延べ)", fmt: fmtNum },
+  ], result.performerSummary));
 
   safe("overlapTable", () => renderTable("overlapTable", [
     { key: "出演者A", label: "出演者A" },
@@ -1083,7 +1129,22 @@ function updateFileList() {
   el.innerHTML = Array.from(loadedFiles).map(f => `<div>✓ ${f}</div>`).join("");
 }
 
+function checkLibraries() {
+  const missing = [];
+  if (typeof Papa === "undefined") missing.push("PapaParse");
+  if (typeof Chart === "undefined") missing.push("Chart.js");
+  const banner = document.getElementById("libError");
+  if (missing.length) {
+    banner.classList.add("show");
+    console.error("必要なライブラリが読み込めていません:", missing.join(", "));
+    return false;
+  }
+  banner.classList.remove("show");
+  return true;
+}
+
 function handleFiles(fileList) {
+  if (!checkLibraries()) return;
   const files = Array.from(fileList).filter(f => f.name.toLowerCase().endsWith(".csv"));
   if (!files.length) return;
 
@@ -1111,6 +1172,7 @@ function handleFiles(fileList) {
   });
 }
 
+checkLibraries();
 const uploadBox = document.getElementById("uploadBox");
 const fileInput = document.getElementById("fileInput");
 
