@@ -159,7 +159,6 @@ function buildEventSummary(records) {
     const issued = sub.filter((r) => r.ステータス === STATUS_ISSUED);
     const expired = sub.filter((r) => r.ステータス !== STATUS_ISSUED);
     const cvs = sub.filter((r) => r.支払い方法 === "コンビニ");
-    const cvsExpired = cvs.filter((r) => r.ステータス !== STATUS_ISSUED);
     const startDate = sub
       .map((r) => r.申込日時)
       .filter(Boolean)
@@ -167,7 +166,7 @@ function buildEventSummary(records) {
     return {
       公演: ev,
       会場: sub[0].event_venue,
-      開始日: formatLocalDate(startDate),
+      申込開始日時: formatLocalDateTime(startDate),
       申込件数: sub.length,
       ユニーク購入者数: new Set(sub.map((r) => r.customer_key)).size,
       発券済み枚数: sum(issued, (r) => r.申込枚数),
@@ -175,7 +174,6 @@ function buildEventSummary(records) {
       期限切れ_未発券件数: expired.length,
       機会損失額: sum(expired, (r) => r.金額),
       コンビニ払い件数: cvs.length,
-      コンビニ払い期限切れ率: cvs.length ? Math.round((cvsExpired.length / cvs.length) * 1000) / 10 : null,
       平均年齢: (() => {
         const ages = sub.map((r) => r.申込者年齢).filter((a) => a !== null && a !== undefined);
         return ages.length ? Math.round((sum(ages, (a) => a) / ages.length) * 10) / 10 : null;
@@ -232,32 +230,6 @@ function buildNewVsRepeat(records) {
     for (const c of customers) seen.add(c);
   }
   return rows;
-}
-
-function buildDormantCustomers(records) {
-  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED);
-  const order = eventOrder(issued);
-  if (order.length < 2) return [];
-  const latest = order[order.length - 1];
-  const byEvent = groupBy(issued, (r) => r.event);
-  const latestCustomers = new Set(byEvent.get(latest).map((r) => r.customer_key));
-  const past = issued.filter((r) => r.event !== latest);
-  const byCustomer = groupBy(past, (r) => r.customer_key);
-  const result = [];
-  for (const [key, rows] of byCustomer.entries()) {
-    if (latestCustomers.has(key)) continue;
-    const sorted = rows.slice().sort((a, b) => (a.申込日時 || 0) - (b.申込日時 || 0));
-    const last = sorted[sorted.length - 1];
-    result.push({
-      表示名: last.申込者本名,
-      Email: last.申込者Email,
-      最終来場公演: last.event,
-      最終来場日: formatLocalDate(last.申込日時),
-      来場回数: new Set(rows.map((r) => r.event)).size,
-    });
-  }
-  result.sort((a, b) => b.来場回数 - a.来場回数 || (b.最終来場日 || "").localeCompare(a.最終来場日 || ""));
-  return result;
 }
 
 // 過去Nヶ月(デフォルト3ヶ月)を基準にした「ファン離脱」「ファン獲得」分析。
@@ -495,7 +467,6 @@ function runFullAnalysis(records) {
     eventSummary: buildEventSummary(records),
     customerMaster: buildCustomerMaster(records),
     newVsRepeat: buildNewVsRepeat(records),
-    dormant: buildDormantCustomers(records),
     fanChurn: buildFanChurn(records),
     performerSummary: buildPerformerSummary(records),
     performerOverlap: buildPerformerOverlap(records),
@@ -513,7 +484,6 @@ if (typeof module !== "undefined") {
     buildEventSummary,
     buildCustomerMaster,
     buildNewVsRepeat,
-    buildDormantCustomers,
     buildFanChurn,
     buildPerformerSummary,
     buildPerformerOverlap,
@@ -580,6 +550,10 @@ if (typeof module !== "undefined") {
   .upload-btn:hover { background: var(--primary-dark); }
   .file-list { margin-top: 14px; font-size: 12px; color: var(--muted); text-align: left; max-width: 520px; margin-left: auto; margin-right: auto; }
   .file-list div { padding: 2px 0; }
+  .file-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .file-remove-btn { border: 1px solid var(--border); background: #fff; color: var(--warn); border-radius: 6px; padding: 3px 10px; font-size: 11px; cursor: pointer; }
+  .file-remove-btn:hover { background: #fdeceb; }
+  .muted-note { color: var(--muted); }
 
   .lib-error {
     display: none;
@@ -602,6 +576,50 @@ if (typeof module !== "undefined") {
     padding: 10px 14px;
     margin-bottom: 24px;
   }
+
+  .event-selector {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-bottom: 24px;
+  }
+  .event-selector-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+  .event-selector-actions { display: flex; gap: 14px; }
+  .link-btn {
+    border: none;
+    background: none;
+    color: var(--primary);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+  }
+  .link-btn:hover { color: var(--primary-dark); }
+  .event-checkbox-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    margin-top: 10px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+  .event-check-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text);
+    background: #f7f9fd;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 12px 5px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .event-check-row input { cursor: pointer; }
+  .event-selector-empty { font-size: 12px; color: var(--muted); }
 
   .kpi-grid {
     display: grid;
@@ -661,6 +679,17 @@ if (typeof module !== "undefined") {
   .badge.warn { background: #fdeceb; color: var(--warn); }
   .badge.good { background: #e9f8ee; color: var(--good); }
 
+  .date-note {
+    font-size: 12px;
+    color: var(--muted);
+    background: #fff8e6;
+    border: 1px solid #f0dca0;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    line-height: 1.6;
+  }
+
   .legend { margin-bottom: 14px; font-size: 12px; }
   .legend summary { cursor: pointer; color: var(--primary); font-weight: 600; }
   .legend dl { margin: 10px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; }
@@ -694,7 +723,19 @@ if (typeof module !== "undefined") {
   </div>
 
   <div class="privacy-note">
-    このツールはすべてブラウザ内(あなたのパソコン上)でCSVを処理します。ファイルはサーバーには一切送信されません。GitHub Pagesなどで公開してご利用いただけますが、購入者の個人情報を含むCSV自体はリポジトリにコミットしないようご注意ください。
+    このツールはすべてブラウザ内(あなたのパソコン上)でCSVを処理します。ファイルはサーバーには一切送信されません。読み込んだCSVのデータは、次回から再アップロードしなくて済むように<strong>このブラウザ(この端末)のlocalStorage</strong>に自動保存されます(他の端末やブラウザには共有されません)。共有パソコンで使う場合や公開設定の際は、下の「すべて削除」でデータを消去できます。GitHub Pagesなどで公開してご利用いただけますが、購入者の個人情報を含むCSV自体はリポジトリにコミットしないようご注意ください。
+  </div>
+
+  <div class="event-selector hidden" id="eventSelectorSection">
+    <div class="event-selector-header">
+      <h3 class="subhead" style="margin:0">分析対象の公演を選択</h3>
+      <div class="event-selector-actions">
+        <button type="button" id="selectAllEventsBtn" class="link-btn">すべて選択</button>
+        <button type="button" id="selectNoneEventsBtn" class="link-btn">すべて解除</button>
+      </div>
+    </div>
+    <div class="desc">チェックした公演のデータだけで、下のすべての分析・グラフを再集計します。単独ライブだけ選ぶことも、複数を組み合わせて選ぶこともできます。</div>
+    <div id="eventCheckboxList" class="event-checkbox-list"></div>
   </div>
 
   <div id="emptyState" class="empty-state">CSVファイルをアップロードすると分析結果が表示されます。</div>
@@ -705,18 +746,22 @@ if (typeof module !== "undefined") {
 
     <section class="panel">
       <h2>公演サマリー</h2>
-      <div class="desc">公演ごとの申込件数・売上・機会損失・コンビニ払い期限切れ率など</div>
+      <div class="desc">公演ごとの申込件数・売上・機会損失など</div>
+      <div class="date-note">
+        <strong>日付・時間について:</strong> アップロードするCSVには公演(ライブ)当日の日付は含まれておらず、「申込日時」(チケット申込・購入が行われた日時)しか記録されていません。
+        そのため「公演」列・「申込開始日時」列に表示される日時は<strong>チケット申込の受付が始まった日時</strong>であり、実際の公演当日の日付とは異なります(通常、公演当日より前に申込が始まります)。
+      </div>
       <details class="legend">
         <summary>項目の説明を見る</summary>
         <dl>
-          <dt>公演</dt><dd>会場名と、その公演の申込受付が始まった日時</dd>
+          <dt>公演</dt><dd>会場名と、その公演のチケット申込受付が始まった日時(公演当日の日付ではありません)</dd>
+          <dt>申込開始日時</dt><dd>その公演でチケット申込の受付が最初に行われた日時(データ内の最も古い申込日時)</dd>
           <dt>申込件数</dt><dd>その公演への申込(注文)の総数。1件の申込で複数枚購入していても1件としてカウント</dd>
           <dt>購入者数</dt><dd>申込者をメールアドレス等で名寄せしたユニーク人数</dd>
           <dt>発券枚数</dt><dd>ステータスが「発券済み」になった申込の合計チケット枚数</dd>
           <dt>確定売上</dt><dd>発券済み分の合計金額(チケット単価×枚数)。実際に入金が確定した売上</dd>
           <dt>期限切れ件数</dt><dd>支払期限切れ、または未発券のまま終わった申込の件数</dd>
           <dt>機会損失額</dt><dd>期限切れ・未発券だった分の合計金額。発券されていれば得られていたはずの売上</dd>
-          <dt>コンビニ期限切れ率</dt><dd>コンビニ払いを選んだ申込のうち、期限内に支払われず失効した割合</dd>
           <dt>平均年齢</dt><dd>申込者のうち年齢が分かる人だけで計算した平均年齢</dd>
         </dl>
       </details>
@@ -778,12 +823,6 @@ if (typeof module !== "undefined") {
     </section>
 
     <section class="panel">
-      <h2>休眠顧客</h2>
-      <div class="desc">過去には来場歴があるが、直近公演には来ていない顧客</div>
-      <div class="table-scroll"><table id="dormantTable"></table></div>
-    </section>
-
-    <section class="panel">
       <h2>ファンの離脱・獲得(過去3か月ベース)</h2>
       <div class="desc" id="fanChurnDesc">データ内で最も新しい申込日を基準に、直近3か月の来場有無で「離脱」「新規獲得」を判定します</div>
       <div class="kpi-grid" id="fanChurnKpis"></div>
@@ -817,8 +856,19 @@ if (typeof module !== "undefined") {
 <script>
 const CHART_COLORS = ["#2f5496", "#e8792c", "#2e9e5b", "#9b59b6", "#d1453b", "#17a2b8", "#f1c40f", "#8395a7", "#576574", "#ee5253"];
 let charts = {};
-let allRecords = [];
-const loadedFiles = new Set();
+const filesData = new Map(); // filename -> normalized records[]
+const STORAGE_PREFIX = "gukkuruTicketAnalytics:";
+const STORAGE_INDEX_KEY = STORAGE_PREFIX + "fileIndex";
+
+// イベント(公演)選択フィルタの状態。
+// knownEventKeys: これまでに一度でも読み込まれたイベントキーの集合(新規イベントのデフォルト選択判定に使う)
+// selectedEvents: 現在チェックが入っている(=分析対象の)イベントキーの集合
+const knownEventKeys = new Set();
+const selectedEvents = new Set();
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 
 function fmtNum(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "-";
@@ -908,14 +958,14 @@ function renderAll(records) {
 
   // 公演サマリー表
   safe("eventSummaryTable", () => renderTable("eventSummaryTable", [
-    { key: "公演", label: "公演", fmt: v => shortEventLabel(v) },
+    { key: "公演", label: "会場", fmt: v => (v.match(/^(.*)_(\d{4}-\d{2}-\d{2}_\d{4})$/) || [null, v])[1] },
+    { key: "申込開始日時", label: "申込開始日時" },
     { key: "申込件数", label: "申込件数", fmt: fmtNum },
     { key: "ユニーク購入者数", label: "購入者数", fmt: fmtNum },
     { key: "発券済み枚数", label: "発券枚数", fmt: fmtNum },
     { key: "確定売上", label: "確定売上", fmt: v => "¥" + fmtNum(v) },
     { key: "期限切れ_未発券件数", label: "期限切れ件数", fmt: fmtNum },
     { key: "機会損失額", label: "機会損失額", fmt: v => "¥" + fmtNum(v) },
-    { key: "コンビニ払い期限切れ率", label: "コンビニ期限切れ率", fmt: v => v === null ? "-" : v + "%" },
     { key: "平均年齢", label: "平均年齢", fmt: v => v === null ? "-" : v },
   ], result.eventSummary));
 
@@ -1059,14 +1109,6 @@ function renderAll(records) {
     { key: "参加公演", label: "参加公演" },
   ], result.customerMaster.slice(0, 30)));
 
-  // 休眠顧客
-  safe("dormantTable", () => renderTable("dormantTable", [
-    { key: "表示名", label: "氏名" },
-    { key: "来場回数", label: "過去の来場回数", fmt: fmtNum },
-    { key: "最終来場公演", label: "最終来場公演", fmt: v => shortEventLabel(v) },
-    { key: "最終来場日", label: "最終来場日" },
-  ], result.dormant.slice(0, 50)));
-
   // ファンの離脱・獲得(過去3か月ベース)
   safe("fanChurn", () => {
     const fc = result.fanChurn;
@@ -1124,9 +1166,190 @@ function renderAll(records) {
   });
 }
 
+// ---------------------------------------------------------------------
+// ブラウザ内データ蓄積(localStorage)
+// 一度読み込んだCSVの生データをこのブラウザに保存しておき、次回アクセス時に
+// 自動で復元する。CSVを毎回アップロードし直さなくても済むようにするための機能。
+// 保存先はあくまで「このブラウザ(この端末・このブラウザアプリ)」のlocalStorageなので、
+// 別の端末やブラウザからは見えない。共有パソコンなどでは「すべて削除」で消せる。
+// ---------------------------------------------------------------------
+
+function getFileIndex() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_INDEX_KEY) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
+function setFileIndex(names) {
+  localStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify(names));
+}
+
+function persistFile(filename, rawRows) {
+  try {
+    localStorage.setItem(STORAGE_PREFIX + "file:" + filename, JSON.stringify(rawRows));
+    const names = getFileIndex();
+    if (!names.includes(filename)) {
+      names.push(filename);
+      setFileIndex(names);
+    }
+    return true;
+  } catch (e) {
+    console.error("localStorageへの保存に失敗しました:", e);
+    showStorageWarning(
+      e && e.name === "QuotaExceededError"
+        ? "ブラウザの保存容量の上限に達したため、このファイルは保存できませんでした。不要なファイルを削除してから再度お試しください。"
+        : "ブラウザへのデータ保存に失敗しました。表示自体は今回のセッション中のみ有効です。"
+    );
+    return false;
+  }
+}
+
+function removeStoredFile(filename) {
+  localStorage.removeItem(STORAGE_PREFIX + "file:" + filename);
+  setFileIndex(getFileIndex().filter(n => n !== filename));
+}
+
+function clearAllStoredFiles() {
+  getFileIndex().forEach(n => localStorage.removeItem(STORAGE_PREFIX + "file:" + n));
+  setFileIndex([]);
+}
+
+function showStorageWarning(message) {
+  const el = document.getElementById("fileList");
+  const warn = document.createElement("div");
+  warn.style.cssText = "color:#d1453b; margin-top:6px;";
+  warn.textContent = "⚠ " + message;
+  el.appendChild(warn);
+}
+
+function loadPersistedData() {
+  const names = getFileIndex();
+  names.forEach(filename => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STORAGE_PREFIX + "file:" + filename) || "null");
+      if (!raw) return;
+      filesData.set(filename, loadEventRows(raw, filename));
+    } catch (e) {
+      console.error("保存済みデータの読み込みに失敗しました:", filename, e);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------
+// ファイル一覧UI・全体の再描画
+// ---------------------------------------------------------------------
+
 function updateFileList() {
   const el = document.getElementById("fileList");
-  el.innerHTML = Array.from(loadedFiles).map(f => `<div>✓ ${f}</div>`).join("");
+  const names = Array.from(filesData.keys());
+  if (!names.length) {
+    el.innerHTML = '<div class="muted-note">保存されているデータはありません</div>';
+    return;
+  }
+  el.innerHTML =
+    names.map(name => `
+      <div class="file-row">
+        <span>✓ ${name}</span>
+        <button type="button" class="file-remove-btn" data-filename="${name}">削除</button>
+      </div>
+    `).join("") +
+    `<button type="button" id="clearAllBtn" class="upload-btn" style="margin-top:10px; background:#8a8f98;">すべて削除</button>`;
+
+  el.querySelectorAll(".file-remove-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.filename;
+      filesData.delete(name);
+      removeStoredFile(name);
+      updateFileList();
+      recomputeAndRender();
+    });
+  });
+  const clearBtn = document.getElementById("clearAllBtn");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      filesData.clear();
+      clearAllStoredFiles();
+      updateFileList();
+      recomputeAndRender();
+    });
+  }
+}
+
+function updateEventSelector() {
+  const all = [].concat(...filesData.values());
+  const events = eventOrder(all); // 開催順(古い順)
+  const currentKeys = new Set(events);
+
+  // 新しく読み込まれたイベントはデフォルトで選択状態にする
+  events.forEach(ev => {
+    if (!knownEventKeys.has(ev)) {
+      knownEventKeys.add(ev);
+      selectedEvents.add(ev);
+    }
+  });
+  // ファイル削除などでなくなったイベントは選択状態からも掃除する
+  Array.from(knownEventKeys).forEach(ev => {
+    if (!currentKeys.has(ev)) {
+      knownEventKeys.delete(ev);
+      selectedEvents.delete(ev);
+    }
+  });
+
+  const section = document.getElementById("eventSelectorSection");
+  const list = document.getElementById("eventCheckboxList");
+
+  if (!events.length) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+
+  list.innerHTML = events.map(ev => {
+    const checked = selectedEvents.has(ev) ? "checked" : "";
+    return `<label class="event-check-row">
+      <input type="checkbox" class="event-checkbox" data-event="${escapeHtml(ev)}" ${checked}>
+      ${escapeHtml(shortEventLabel(ev))}
+    </label>`;
+  }).join("");
+
+  list.querySelectorAll(".event-checkbox").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const ev = cb.dataset.event;
+      if (cb.checked) selectedEvents.add(ev);
+      else selectedEvents.delete(ev);
+      applyFilterAndRender();
+    });
+  });
+}
+
+function applyFilterAndRender() {
+  const all = [].concat(...filesData.values());
+  const emptyEl = document.getElementById("emptyState");
+
+  if (!all.length) {
+    document.getElementById("dashboard").classList.add("hidden");
+    emptyEl.textContent = "CSVファイルをアップロードすると分析結果が表示されます。";
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+
+  const filtered = all.filter(r => selectedEvents.has(r.event));
+  if (!filtered.length) {
+    document.getElementById("dashboard").classList.add("hidden");
+    emptyEl.textContent = "選択されている公演がありません。上の「分析対象の公演を選択」でチェックを入れてください。";
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+
+  emptyEl.classList.add("hidden");
+  renderAll(filtered);
+}
+
+function recomputeAndRender() {
+  updateEventSelector();
+  applyFilterAndRender();
 }
 
 function checkLibraries() {
@@ -1156,12 +1379,12 @@ function handleFiles(fileList) {
       encoding: "UTF-8",
       complete: (res) => {
         const recs = loadEventRows(res.data, file.name);
-        allRecords = allRecords.concat(recs);
-        loadedFiles.add(file.name);
+        filesData.set(file.name, recs);
+        persistFile(file.name, res.data);
         pending--;
         if (pending === 0) {
           updateFileList();
-          renderAll(allRecords);
+          recomputeAndRender();
         }
       },
       error: (err) => {
@@ -1173,6 +1396,10 @@ function handleFiles(fileList) {
 }
 
 checkLibraries();
+loadPersistedData();
+updateFileList();
+recomputeAndRender();
+
 const uploadBox = document.getElementById("uploadBox");
 const fileInput = document.getElementById("fileInput");
 
@@ -1186,6 +1413,17 @@ fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
 });
 uploadBox.addEventListener("drop", (e) => {
   if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+});
+
+document.getElementById("selectAllEventsBtn").addEventListener("click", () => {
+  knownEventKeys.forEach(ev => selectedEvents.add(ev));
+  updateEventSelector();
+  applyFilterAndRender();
+});
+document.getElementById("selectNoneEventsBtn").addEventListener("click", () => {
+  selectedEvents.clear();
+  updateEventSelector();
+  applyFilterAndRender();
 });
 </script>
 </body>
