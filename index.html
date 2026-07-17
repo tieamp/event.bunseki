@@ -890,6 +890,13 @@ if (typeof module !== "undefined") {
     </section>
 
     <section class="panel">
+      <h2>選択公演をまたぐ重複顧客</h2>
+      <div class="desc">現在選択されている公演のうち、2公演以上に来場した顧客(発券済みチケットのみ集計)</div>
+      <div class="kpi-grid" id="overlapKpis"></div>
+      <div class="table-scroll" style="max-height:360px"><table id="overlapCustomersTable"></table></div>
+    </section>
+
+    <section class="panel">
       <h2>ファンの離脱・獲得(過去3か月ベース)</h2>
       <div class="desc" id="fanChurnDesc">データ内で最も新しい申込日を基準に、直近3か月の来場有無で「離脱」「新規獲得」を判定します</div>
       <div class="performer-filter-box">
@@ -1205,6 +1212,32 @@ function renderAll(records) {
     { key: "累計金額", label: "累計金額", fmt: v => "¥" + fmtNum(v) },
     { key: "参加公演", label: "参加公演" },
   ], result.customerMaster.slice(0, 30)));
+
+  // 選択公演をまたぐ重複顧客(2公演以上に来場した顧客)
+  safe("overlapCustomers", () => {
+    const overlapping = result.customerMaster.filter((c) => c.来場回数 >= 2);
+    const totalCustomers = result.customerMaster.length;
+    const pct = totalCustomers ? Math.round((overlapping.length / totalCustomers) * 1000) / 10 : 0;
+    const cards = [
+      { label: "重複顧客数", value: fmtNum(overlapping.length) + "名", sub: "選択中の公演のうち2公演以上に来場" },
+      { label: "選択公演の来場者に占める割合", value: pct + "%", sub: `選択中の公演の来場者 ${fmtNum(totalCustomers)}名中` },
+    ];
+    document.getElementById("overlapKpis").innerHTML = cards.map(c => `
+      <div class="kpi-card">
+        <div class="label">${c.label}</div>
+        <div class="value">${c.value}</div>
+        <div class="sub">${c.sub}</div>
+      </div>
+    `).join("");
+
+    renderTable("overlapCustomersTable", [
+      { key: "表示名", label: "氏名" },
+      { key: "来場回数", label: "来場回数", fmt: fmtNum },
+      { key: "初回来場", label: "初回来場" },
+      { key: "最終来場", label: "最終来場" },
+      { key: "参加公演", label: "参加公演", fmt: v => v.split(", ").map(shortEventLabel).join(" / ") },
+    ], overlapping);
+  });
 
   // ファンの離脱・獲得(過去3か月ベース、お目当てでフィルタ可能)
   safe("fanChurn", () => renderFanChurnSection(records));
