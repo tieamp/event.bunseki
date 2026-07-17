@@ -1,3 +1,12 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>主催ライブ チケット購入者分析ダッシュボード</title>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
 // 主催ライブ チケット購入者分析ロジック (ブラウザ / Node 共用)
 // analyze.py の集計ロジックをJavaScriptに移植したもの。
 
@@ -506,3 +515,1173 @@ if (typeof module !== "undefined") {
     findSimilarNames,
   };
 }
+
+</script>
+<style>
+  :root {
+    --bg: #f4f6fb;
+    --card-bg: #ffffff;
+    --primary: #2f5496;
+    --primary-dark: #1f3a6e;
+    --accent: #e8792c;
+    --text: #1f2430;
+    --muted: #6b7280;
+    --border: #e3e7f0;
+    --good: #2e9e5b;
+    --warn: #d1453b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    background: linear-gradient(120deg, var(--primary), var(--primary-dark));
+    color: #fff;
+    padding: 28px 32px;
+  }
+  header h1 { margin: 0 0 6px; font-size: 22px; }
+  header p { margin: 0; opacity: 0.85; font-size: 13px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 20px 60px; }
+
+  .upload-box {
+    background: var(--card-bg);
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    text-align: center;
+    margin-bottom: 24px;
+    transition: border-color .2s, background .2s;
+  }
+  .upload-box.dragover { border-color: var(--primary); background: #eef2fb; }
+  .upload-box p { margin: 4px 0; color: var(--muted); font-size: 13px; }
+  .upload-box input[type=file] { display: none; }
+  .upload-btn {
+    display: inline-block;
+    background: var(--primary);
+    color: #fff;
+    padding: 10px 22px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-top: 8px;
+  }
+  .upload-btn:hover { background: var(--primary-dark); }
+  .file-list { margin-top: 14px; font-size: 12px; color: var(--muted); text-align: left; max-width: 520px; margin-left: auto; margin-right: auto; }
+  .file-list div { padding: 2px 0; }
+  .file-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .file-remove-btn { border: 1px solid var(--border); background: #fff; color: var(--warn); border-radius: 6px; padding: 3px 10px; font-size: 11px; cursor: pointer; }
+  .file-remove-btn:hover { background: #fdeceb; }
+  .muted-note { color: var(--muted); }
+
+  .lib-error {
+    display: none;
+    font-size: 13px;
+    color: #7a1f1a;
+    background: #fdeceb;
+    border: 1px solid #f3b9b4;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+  }
+  .lib-error.show { display: block; }
+  .lib-error strong { display: block; margin-bottom: 4px; }
+
+  .privacy-note {
+    font-size: 12px;
+    color: var(--muted);
+    background: #eef2fb;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 24px;
+  }
+
+  .event-selector {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-bottom: 24px;
+  }
+  .event-selector-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+  .event-selector-actions { display: flex; gap: 14px; }
+  .link-btn {
+    border: none;
+    background: none;
+    color: var(--primary);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+  }
+  .link-btn:hover { color: var(--primary-dark); }
+  .event-checkbox-list {
+    margin-top: 10px;
+    max-height: 420px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+  .month-group {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 10px;
+    background: #fbfcfe;
+  }
+  .month-group summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    cursor: pointer;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--primary-dark);
+    list-style: none;
+  }
+  .month-group summary::-webkit-details-marker { display: none; }
+  .month-group summary::before { content: "▸ "; color: var(--muted); }
+  .month-group[open] summary::before { content: "▾ "; }
+  .month-actions { display: flex; gap: 12px; font-weight: 400; }
+  .month-events {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 0 14px 12px;
+  }
+  .event-check-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text);
+    background: #f7f9fd;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 12px 5px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .event-check-row input { cursor: pointer; }
+  .event-selector-empty { font-size: 12px; color: var(--muted); }
+
+  .performer-filter-box {
+    background: #f7f9fd;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+  }
+  .performer-checkbox-list {
+    max-height: 140px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 14px;
+    margin-bottom: 28px;
+  }
+  .kpi-card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+  }
+  .kpi-card .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .kpi-card .value { font-size: 22px; font-weight: 700; color: var(--primary-dark); }
+  .kpi-card .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  section.panel {
+    background: var(--card-bg);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    padding: 20px 22px;
+    margin-bottom: 20px;
+  }
+  section.panel h2 {
+    font-size: 15px;
+    margin: 0 0 4px;
+    color: var(--primary-dark);
+  }
+  section.panel .desc { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+
+  .chart-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 20px;
+  }
+  .chart-box { position: relative; height: 300px; }
+  .chart-box.tall { height: 360px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  th, td {
+    border-bottom: 1px solid var(--border);
+    padding: 7px 10px;
+    text-align: right;
+    white-space: nowrap;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #f7f9fd; color: var(--primary-dark); font-weight: 600; position: sticky; top: 0; }
+  tr:hover td { background: #fbfcfe; }
+  .table-scroll { max-height: 380px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; }
+  .badge.warn { background: #fdeceb; color: var(--warn); }
+  .badge.good { background: #e9f8ee; color: var(--good); }
+
+  .date-note {
+    font-size: 12px;
+    color: var(--muted);
+    background: #fff8e6;
+    border: 1px solid #f0dca0;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    line-height: 1.6;
+  }
+
+  .legend { margin-bottom: 14px; font-size: 12px; }
+  .legend summary { cursor: pointer; color: var(--primary); font-weight: 600; }
+  .legend dl { margin: 10px 0 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; }
+  .legend dt { font-weight: 600; color: var(--primary-dark); white-space: nowrap; }
+  .legend dd { margin: 0; color: var(--muted); }
+
+  .subhead { font-size: 13px; margin: 0 0 8px; color: var(--primary-dark); }
+
+  .hidden { display: none !important; }
+  .empty-state { text-align: center; color: var(--muted); padding: 40px 0; font-size: 13px; }
+  footer { text-align: center; color: var(--muted); font-size: 11px; padding: 20px 0 40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>主催ライブ チケット購入者分析ダッシュボード</h1>
+  <p>チケット申込者CSV(複数公演分)をアップロードすると、公演サマリー・リピーター・出演者集客・属性・決済・タイミングをグラフと表で可視化します。</p>
+</header>
+
+<main>
+  <div class="lib-error" id="libError">
+    <strong>グラフ用ライブラリ(Chart.js / PapaParse)の読み込みに失敗しました</strong>
+    ネットワーク環境や広告ブロッカー、社内ファイアウォールなどでCDN(cdn.jsdelivr.net)がブロックされている可能性があります。別のネットワークやブラウザ、シークレットウィンドウでお試しいただくか、時間をおいて再度アクセスしてみてください。
+  </div>
+  <div class="upload-box" id="uploadBox">
+    <p><strong>ここにCSVファイルをドラッグ&ドロップ</strong>、またはボタンから選択してください(複数選択可)</p>
+    <label class="upload-btn" for="fileInput">CSVファイルを選択</label>
+    <input type="file" id="fileInput" accept=".csv" multiple>
+    <div class="file-list" id="fileList"></div>
+  </div>
+
+  <div class="privacy-note">
+    このツールはすべてブラウザ内(あなたのパソコン上)でCSVを処理します。ファイルはサーバーには一切送信されません。読み込んだCSVのデータは、次回から再アップロードしなくて済むように<strong>このブラウザ(この端末)のlocalStorage</strong>に自動保存されます(他の端末やブラウザには共有されません)。共有パソコンで使う場合や公開設定の際は、下の「すべて削除」でデータを消去できます。GitHub Pagesなどで公開してご利用いただけますが、購入者の個人情報を含むCSV自体はリポジトリにコミットしないようご注意ください。
+  </div>
+
+  <div class="event-selector hidden" id="eventSelectorSection">
+    <div class="event-selector-header">
+      <h3 class="subhead" style="margin:0">分析対象の公演を選択</h3>
+      <div class="event-selector-actions">
+        <button type="button" id="selectAllEventsBtn" class="link-btn">すべて選択</button>
+        <button type="button" id="selectNoneEventsBtn" class="link-btn">すべて解除</button>
+      </div>
+    </div>
+    <div class="desc">チェックした公演のデータだけで、下のすべての分析・グラフを再集計します。単独ライブだけ選ぶことも、複数を組み合わせて選ぶこともできます。</div>
+    <div id="eventCheckboxList" class="event-checkbox-list"></div>
+  </div>
+
+  <div id="emptyState" class="empty-state">CSVファイルをアップロードすると分析結果が表示されます。</div>
+
+  <div id="dashboard" class="hidden">
+
+    <div class="kpi-grid" id="kpiGrid"></div>
+
+    <section class="panel">
+      <h2>公演サマリー</h2>
+      <div class="desc">公演ごとの申込件数・売上・機会損失など</div>
+      <div class="date-note">
+        <strong>日付・時間について:</strong> アップロードするCSVには公演(ライブ)当日の日付は含まれておらず、「申込日時」(チケット申込・購入が行われた日時)しか記録されていません。
+        そのため当ツールでは、その公演で<strong>最後にチケット申込があった日時</strong>(チケット販売終了に近いタイミング)を「開催日の目安」として使用しています。実際の公演当日とは前後する場合があります。
+      </div>
+      <details class="legend">
+        <summary>項目の説明を見る</summary>
+        <dl>
+          <dt>公演</dt><dd>会場名と、その公演で最後にチケット申込があった日時(開催日の目安として使用。公演当日そのものではありません)</dd>
+          <dt>開催日目安</dt><dd>その公演で最後にチケット申込があった日付。チケット販売終了に近いタイミングであり、実際の公演日の目安として使用</dd>
+          <dt>申込開始日時</dt><dd>その公演でチケット申込の受付が最初に行われた日時(データ内の最も古い申込日時)</dd>
+          <dt>申込終了日時</dt><dd>その公演で最後にチケット申込があった日時(データ内の最も新しい申込日時。「開催日目安」の元になった日時)</dd>
+          <dt>申込件数</dt><dd>その公演への申込(注文)の総数。1件の申込で複数枚購入していても1件としてカウント</dd>
+          <dt>購入者数</dt><dd>申込者をメールアドレス等で名寄せしたユニーク人数</dd>
+          <dt>発券枚数</dt><dd>ステータスが「発券済み」になった申込の合計チケット枚数</dd>
+          <dt>確定売上</dt><dd>発券済み分の合計金額(チケット単価×枚数)。実際に入金が確定した売上</dd>
+          <dt>期限切れ件数</dt><dd>支払期限切れ、または未発券のまま終わった申込の件数</dd>
+          <dt>機会損失額</dt><dd>期限切れ・未発券だった分の合計金額。発券されていれば得られていたはずの売上</dd>
+          <dt>平均年齢</dt><dd>申込者のうち年齢が分かる人だけで計算した平均年齢</dd>
+        </dl>
+      </details>
+      <div class="table-scroll"><table id="eventSummaryTable"></table></div>
+    </section>
+
+    <section class="panel">
+      <h2>売上・新規vsリピーターの推移</h2>
+      <div class="desc">公演の開催順に並べています</div>
+      <div class="chart-grid">
+        <div class="chart-box"><canvas id="chartRevenue"></canvas></div>
+        <div class="chart-box"><canvas id="chartNewRepeat"></canvas></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>出演者(お目当て)分析</h2>
+      <div class="desc">申込件数上位10組の集客力(累計)と、1公演あたりの平均動員数、公演をまたいだファン層の重複</div>
+      <div class="chart-grid">
+        <div class="chart-box tall"><canvas id="chartPerformer"></canvas></div>
+        <div class="chart-box tall"><canvas id="chartPerformerAvg"></canvas></div>
+      </div>
+      <h3 class="subhead" style="margin-top:18px">出演者別サマリー</h3>
+      <div class="table-scroll" style="max-height:320px">
+        <table id="performerSummaryTable"></table>
+      </div>
+      <h3 class="subhead" style="margin-top:18px">出演者間のファン層重複</h3>
+      <div class="table-scroll" style="max-height:320px">
+        <table id="overlapTable"></table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>購入者属性</h2>
+      <div class="desc">年齢層・性別・都道府県・券種の分布(発券済みのみ集計)</div>
+      <div class="chart-grid">
+        <div class="chart-box"><canvas id="chartAge"></canvas></div>
+        <div class="chart-box"><canvas id="chartGender"></canvas></div>
+        <div class="chart-box"><canvas id="chartPref"></canvas></div>
+        <div class="chart-box"><canvas id="chartTicketType"></canvas></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>決済方法・申込タイミング</h2>
+      <div class="desc">支払い方法別の期限切れ率、曜日・時間帯別の申込集中度、発売開始からの初速、開催前日・当日の駆け込み申込</div>
+      <div class="chart-grid">
+        <div class="chart-box"><canvas id="chartPayment"></canvas></div>
+        <div class="chart-box"><canvas id="chartDow"></canvas></div>
+        <div class="chart-box"><canvas id="chartHour"></canvas></div>
+        <div class="chart-box"><canvas id="chartSpeed"></canvas></div>
+      </div>
+      <h3 class="subhead" style="margin-top:18px">公演別 前日・当日の申込件数(開催日目安基準)</h3>
+      <div class="table-scroll" style="max-height:280px">
+        <table id="timingSpeedDetailTable"></table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>顧客マスタ(LTVランキング)</h2>
+      <div class="desc">来場回数・累計金額が多い順(上位30名)</div>
+      <div class="table-scroll"><table id="customerTable"></table></div>
+    </section>
+
+    <section class="panel">
+      <h2>選択公演すべてに来場した重複顧客</h2>
+      <div class="desc">現在選択されている公演の「すべて」に来場した顧客(発券済みチケットのみ集計)。公演を2つ以上選択している場合のみ集計されます。</div>
+      <div id="overlapBody">
+        <div class="kpi-grid" id="overlapKpis"></div>
+        <div class="table-scroll" style="max-height:360px"><table id="overlapCustomersTable"></table></div>
+      </div>
+      <div id="overlapEmpty" class="event-selector-empty hidden">公演を2つ以上選択すると集計されます。</div>
+    </section>
+
+    <section class="panel">
+      <h2>ファンの離脱・獲得(過去3か月ベース)</h2>
+      <div class="desc" id="fanChurnDesc">データ内で最も新しい申込日を基準に、直近3か月の来場有無で「離脱」「新規獲得」を判定します</div>
+      <div class="performer-filter-box">
+        <div class="desc" style="margin-bottom:6px">対象にするお目当て(出演者)を選択(チェックした出演者を目当てに申込んだ人だけを分析対象にします):</div>
+        <div id="fanChurnPerformerList" class="event-checkbox-list performer-checkbox-list"></div>
+      </div>
+      <div id="fanChurnBody">
+        <div class="kpi-grid" id="fanChurnKpis"></div>
+        <div class="chart-grid">
+          <div>
+            <h3 class="subhead">離脱ファン(過去3か月来場なし)</h3>
+            <div class="table-scroll" style="max-height:320px"><table id="churnedTable"></table></div>
+          </div>
+          <div>
+            <h3 class="subhead">新規獲得ファン(過去3か月で初来場)</h3>
+            <div class="table-scroll" style="max-height:320px"><table id="acquiredTable"></table></div>
+          </div>
+        </div>
+      </div>
+      <div id="fanChurnEmpty" class="event-selector-empty hidden">対象の出演者が選択されていません。上のチェックボックスで1つ以上選んでください。</div>
+    </section>
+
+    <section class="panel">
+      <h2>データ品質チェック</h2>
+      <div class="desc">出演者名・券種名の表記ゆれ候補、主要項目の欠損状況</div>
+      <div class="chart-grid">
+        <div><div class="table-scroll" style="max-height:220px"><table id="qualityPerformerTable"></table></div></div>
+        <div><div class="table-scroll" style="max-height:220px"><table id="qualityTicketTable"></table></div></div>
+      </div>
+      <div id="missingSummary" style="margin-top:14px; font-size:12.5px; color: var(--muted);"></div>
+    </section>
+
+  </div>
+</main>
+
+<footer>主催ライブ チケット購入者分析ツール — データはブラウザ内でのみ処理されます</footer>
+
+<script>
+const CHART_COLORS = ["#2f5496", "#e8792c", "#2e9e5b", "#9b59b6", "#d1453b", "#17a2b8", "#f1c40f", "#8395a7", "#576574", "#ee5253"];
+let charts = {};
+const filesData = new Map(); // filename -> normalized records[]
+const STORAGE_PREFIX = "gukkuruTicketAnalytics:";
+const STORAGE_INDEX_KEY = STORAGE_PREFIX + "fileIndex";
+
+// イベント(公演)選択フィルタの状態。
+// knownEventKeys: これまでに一度でも読み込まれたイベントキーの集合(新規イベントのデフォルト選択判定に使う)
+// selectedEvents: 現在チェックが入っている(=分析対象の)イベントキーの集合
+const knownEventKeys = new Set();
+const selectedEvents = new Set();
+
+// ファンの離脱・獲得セクション専用の「お目当て(出演者)」フィルタの状態。
+// 選択肢はグットクルー、スイモアマイモン！の2つのみに固定する。
+// selectedFanPerformers: 現在チェックが入っている(=分析対象の)出演者名の集合
+// fanPerformerDefaultsApplied: 初回のみ、両方をデフォルトで選択状態にするためのフラグ
+const FAN_PERFORMER_OPTIONS = ["グットクルー", "スイモアマイモン！"];
+const selectedFanPerformers = new Set();
+let fanPerformerDefaultsApplied = false;
+let lastRenderedRecords = [];
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function fmtNum(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "-";
+  return Number(n).toLocaleString("ja-JP");
+}
+
+function destroyChart(id) {
+  if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+}
+
+function makeChart(id, config) {
+  destroyChart(id);
+  const ctx = document.getElementById(id).getContext("2d");
+  charts[id] = new Chart(ctx, config);
+}
+
+function renderTable(tableId, columns, rows) {
+  const table = document.getElementById(tableId);
+  const thead = "<thead><tr>" + columns.map(c => `<th>${c.label}</th>`).join("") + "</tr></thead>";
+  const tbody = "<tbody>" + rows.map(row => {
+    return "<tr>" + columns.map(c => {
+      const raw = row[c.key];
+      const val = c.fmt ? c.fmt(raw, row) : (raw === null || raw === undefined ? "-" : raw);
+      return `<td>${val}</td>`;
+    }).join("") + "</tr>";
+  }).join("") + "</tbody>";
+  table.innerHTML = thead + tbody;
+}
+
+function shortEventLabel(ev) {
+  // "会場_YYYY-MM-DD_HHMM" -> "会場 M/D H:MM"
+  const m = ev.match(/^(.*)_(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})$/);
+  if (!m) return ev;
+  const [, venue, , mo, da, hh, mi] = m;
+  return `${venue} ${parseInt(mo)}/${parseInt(da)} ${hh}:${mi}`;
+}
+
+function updateKpis(result, recordCount) {
+  const es = result.eventSummary;
+  const totalRevenue = es.reduce((a, b) => a + b.確定売上, 0);
+  const totalLoss = es.reduce((a, b) => a + b.機会損失額, 0);
+  const totalCustomers = result.customerMaster.length;
+  const repeaters = result.customerMaster.filter(c => c.来場回数 >= 2).length;
+  const repeatRate = totalCustomers ? Math.round((repeaters / totalCustomers) * 1000) / 10 : 0;
+
+  const cards = [
+    { label: "公演数", value: es.length + "件" },
+    { label: "総申込件数", value: fmtNum(recordCount) + "件" },
+    { label: "ユニーク購入者数", value: fmtNum(totalCustomers) + "名" },
+    { label: "確定売上合計", value: "¥" + fmtNum(totalRevenue) },
+    { label: "機会損失額合計", value: "¥" + fmtNum(totalLoss), sub: "支払期限切れ・未発券分" },
+    { label: "リピーター比率", value: repeatRate + "%", sub: `${repeaters}名が複数公演に参加` },
+  ];
+  document.getElementById("kpiGrid").innerHTML = cards.map(c => `
+    <div class="kpi-card">
+      <div class="label">${c.label}</div>
+      <div class="value">${c.value}</div>
+      ${c.sub ? `<div class="sub">${c.sub}</div>` : ""}
+    </div>
+  `).join("");
+}
+
+function safe(label, fn) {
+  try {
+    fn();
+  } catch (e) {
+    console.error(`[${label}] の描画に失敗しました:`, e);
+    const el = document.getElementById(label);
+    if (el && el.tagName === "CANVAS") {
+      const box = el.closest(".chart-box");
+      if (box) {
+        const msg = document.createElement("div");
+        msg.style.cssText = "font-size:11px;color:#d1453b;padding:8px;";
+        msg.textContent = `このグラフの描画でエラーが発生しました(${e.message || e})`;
+        box.appendChild(msg);
+      }
+    }
+  }
+}
+
+function renderAll(records) {
+  const result = runFullAnalysis(records);
+  document.getElementById("emptyState").classList.add("hidden");
+  document.getElementById("dashboard").classList.remove("hidden");
+
+  safe("kpi", () => updateKpis(result, records.length));
+
+  // 公演サマリー表
+  safe("eventSummaryTable", () => renderTable("eventSummaryTable", [
+    { key: "公演", label: "会場", fmt: v => (v.match(/^(.*)_(\d{4}-\d{2}-\d{2}_\d{4})$/) || [null, v])[1] },
+    { key: "開催日目安", label: "開催日目安" },
+    { key: "申込開始日時", label: "申込開始日時" },
+    { key: "申込終了日時", label: "申込終了日時" },
+    { key: "申込件数", label: "申込件数", fmt: fmtNum },
+    { key: "ユニーク購入者数", label: "購入者数", fmt: fmtNum },
+    { key: "発券済み枚数", label: "発券枚数", fmt: fmtNum },
+    { key: "確定売上", label: "確定売上", fmt: v => "¥" + fmtNum(v) },
+    { key: "期限切れ_未発券件数", label: "期限切れ件数", fmt: fmtNum },
+    { key: "機会損失額", label: "機会損失額", fmt: v => "¥" + fmtNum(v) },
+    { key: "平均年齢", label: "平均年齢", fmt: v => v === null ? "-" : v },
+  ], result.eventSummary));
+
+  // 売上推移
+  safe("chartRevenue", () => {
+    const evLabels = result.eventSummary.map(e => shortEventLabel(e.公演));
+    makeChart("chartRevenue", {
+      type: "bar",
+      data: {
+        labels: evLabels,
+        datasets: [
+          { label: "確定売上", data: result.eventSummary.map(e => e.確定売上), backgroundColor: CHART_COLORS[0] },
+          { label: "機会損失額", data: result.eventSummary.map(e => e.機会損失額), backgroundColor: CHART_COLORS[4] },
+        ],
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 確定売上 / 機会損失額" } } },
+    });
+  });
+
+  // 新規vsリピーター
+  safe("chartNewRepeat", () => {
+    makeChart("chartNewRepeat", {
+      type: "bar",
+      data: {
+        labels: result.newVsRepeat.map(e => shortEventLabel(e.公演)),
+        datasets: [
+          { label: "新規顧客数", data: result.newVsRepeat.map(e => e.新規顧客数), backgroundColor: CHART_COLORS[0], stack: "s" },
+          { label: "リピーター数", data: result.newVsRepeat.map(e => e.リピーター数), backgroundColor: CHART_COLORS[1], stack: "s" },
+        ],
+      },
+      options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "公演別 新規顧客数 / リピーター数" } } },
+    });
+  });
+
+  // 出演者別集客
+  safe("chartPerformer", () => {
+    const topPerformers = result.performerSummary.slice(0, 10);
+    makeChart("chartPerformer", {
+      type: "bar",
+      data: {
+        labels: topPerformers.map(p => p.お目当て),
+        datasets: [{ label: "ユニーク集客数", data: topPerformers.map(p => p.ユニーク集客数), backgroundColor: CHART_COLORS[2] }],
+      },
+      options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "出演者別 累計ユニーク集客数(上位10)" } } },
+    });
+  });
+
+  safe("chartPerformerAvg", () => {
+    const topByAvg = result.performerSummary.slice().sort((a, b) => b.公演あたり平均動員数 - a.公演あたり平均動員数).slice(0, 10);
+    makeChart("chartPerformerAvg", {
+      type: "bar",
+      data: {
+        labels: topByAvg.map(p => `${p.お目当て}(${p.出演公演数}公演)`),
+        datasets: [{ label: "1公演あたり平均動員数", data: topByAvg.map(p => p.公演あたり平均動員数), backgroundColor: CHART_COLORS[6] }],
+      },
+      options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "出演者別 1公演あたり平均動員数(上位10)" } } },
+    });
+  });
+
+  safe("performerSummaryTable", () => renderTable("performerSummaryTable", [
+    { key: "お目当て", label: "出演者" },
+    { key: "出演公演数", label: "出演公演数", fmt: fmtNum },
+    { key: "ユニーク集客数", label: "累計ユニーク集客数", fmt: fmtNum },
+    { key: "公演あたり平均動員数", label: "1公演あたり平均動員数" },
+    { key: "申込件数", label: "申込件数(延べ)", fmt: fmtNum },
+  ], result.performerSummary));
+
+  safe("overlapTable", () => renderTable("overlapTable", [
+    { key: "出演者A", label: "出演者A" },
+    { key: "出演者B", label: "出演者B" },
+    { key: "共通ファン数", label: "共通ファン数", fmt: fmtNum },
+    { key: "重複率", label: "重複率", fmt: v => v + "%" },
+  ], result.performerOverlap.slice(0, 30)));
+
+  // 属性
+  safe("chartAge", () => makeChart("chartAge", {
+    type: "bar",
+    data: { labels: result.demographics.age.map(a => a.label), datasets: [{ label: "人数", data: result.demographics.age.map(a => a.count), backgroundColor: CHART_COLORS[0] }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "年齢層分布" } } },
+  }));
+  safe("chartGender", () => makeChart("chartGender", {
+    type: "doughnut",
+    data: { labels: result.demographics.gender.map(g => g.label), datasets: [{ data: result.demographics.gender.map(g => g.count), backgroundColor: CHART_COLORS }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "性別分布" } } },
+  }));
+  safe("chartPref", () => {
+    const topPref = result.demographics.prefecture.slice(0, 10);
+    makeChart("chartPref", {
+      type: "bar",
+      data: { labels: topPref.map(p => p.label), datasets: [{ label: "人数", data: topPref.map(p => p.count), backgroundColor: CHART_COLORS[3] }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "都道府県分布(上位10、未回答除く)" } } },
+    });
+  });
+  safe("chartTicketType", () => makeChart("chartTicketType", {
+    type: "bar",
+    data: { labels: result.demographics.ticketType.map(t => t.label), datasets: [{ label: "件数", data: result.demographics.ticketType.map(t => t.count), backgroundColor: CHART_COLORS[5] }] },
+    options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "券種分布" } } },
+  }));
+
+  // 決済・タイミング
+  safe("chartPayment", () => makeChart("chartPayment", {
+    type: "bar",
+    data: {
+      labels: result.payment.map(p => p.支払い方法),
+      datasets: [
+        { label: "発券済み", data: result.payment.map(p => p.発券済み), backgroundColor: CHART_COLORS[2], stack: "s" },
+        { label: "期限切れ/未発券", data: result.payment.map(p => p.期限切れ_未発券), backgroundColor: CHART_COLORS[4], stack: "s" },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "支払い方法別 発券状況" } } },
+  }));
+  safe("chartDow", () => makeChart("chartDow", {
+    type: "bar",
+    data: { labels: result.timing.dow.map(d => d.label), datasets: [{ label: "申込件数", data: result.timing.dow.map(d => d.count), backgroundColor: CHART_COLORS[0] }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "曜日別 申込件数" } } },
+  }));
+  safe("chartHour", () => makeChart("chartHour", {
+    type: "line",
+    data: { labels: result.timing.hour.map(h => h.label), datasets: [{ label: "申込件数", data: result.timing.hour.map(h => h.count), borderColor: CHART_COLORS[1], backgroundColor: CHART_COLORS[1] + "33", fill: true, tension: 0.3 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "時間帯別 申込件数" } } },
+  }));
+  safe("chartSpeed", () => makeChart("chartSpeed", {
+    type: "bar",
+    data: {
+      labels: result.timing.speed.map(s => shortEventLabel(s.公演)),
+      datasets: [
+        { label: "10分以内(%)", data: result.timing.speed.map(s => s["10分以内"]), backgroundColor: CHART_COLORS[0] },
+        { label: "1時間以内(%)", data: result.timing.speed.map(s => s["1時間以内"]), backgroundColor: CHART_COLORS[1] },
+        { label: "1日以内(%)", data: result.timing.speed.map(s => s["1日以内"]), backgroundColor: CHART_COLORS[2] },
+        { label: "前日(%)", data: result.timing.speed.map(s => s.前日率), backgroundColor: CHART_COLORS[4] },
+        { label: "当日(%)", data: result.timing.speed.map(s => s.当日率), backgroundColor: CHART_COLORS[9] },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 申込の初速(発売開始からの経過時間)と前日・当日の駆け込み率" } } },
+  }));
+
+  safe("timingSpeedDetailTable", () => renderTable("timingSpeedDetailTable", [
+    { key: "公演", label: "公演", fmt: v => shortEventLabel(v) },
+    { key: "申込件数", label: "申込件数(合計)", fmt: fmtNum },
+    { key: "前日件数", label: "前日の申込件数", fmt: fmtNum },
+    { key: "前日率", label: "前日の割合", fmt: v => v + "%" },
+    { key: "当日件数", label: "当日の申込件数", fmt: fmtNum },
+    { key: "当日率", label: "当日の割合", fmt: v => v + "%" },
+  ], result.timing.speed));
+
+  // 顧客マスタ
+  safe("customerTable", () => renderTable("customerTable", [
+    { key: "表示名", label: "氏名" },
+    { key: "来場回数", label: "来場回数", fmt: fmtNum },
+    { key: "累計枚数", label: "累計枚数", fmt: fmtNum },
+    { key: "累計金額", label: "累計金額", fmt: v => "¥" + fmtNum(v) },
+    { key: "参加公演", label: "参加公演" },
+  ], result.customerMaster.slice(0, 30)));
+
+  // 選択公演すべてに来場した重複顧客(公演を2つ以上選択している場合のみ集計)
+  safe("overlapCustomers", () => {
+    const totalEventCount = new Set(records.filter((r) => r.ステータス === "発券済み").map((r) => r.event)).size;
+    const overlapEmptyEl = document.getElementById("overlapEmpty");
+    const overlapBodyEl = document.getElementById("overlapBody");
+
+    if (totalEventCount < 2) {
+      overlapBodyEl.classList.add("hidden");
+      overlapEmptyEl.classList.remove("hidden");
+      return;
+    }
+    overlapBodyEl.classList.remove("hidden");
+    overlapEmptyEl.classList.add("hidden");
+
+    const totalCustomers = result.customerMaster.length;
+    const overlapping = result.customerMaster.filter((c) => c.来場回数 === totalEventCount);
+    const notOverlapping = totalCustomers - overlapping.length;
+    const pct = totalCustomers ? Math.round((overlapping.length / totalCustomers) * 1000) / 10 : 0;
+    const notPct = totalCustomers ? Math.round((notOverlapping / totalCustomers) * 1000) / 10 : 0;
+    const cards = [
+      { label: "全公演来場者数", value: fmtNum(overlapping.length) + "名", sub: `選択中の${fmtNum(totalEventCount)}公演すべてに来場` },
+      { label: "全公演来場者の割合", value: pct + "%", sub: `選択中の公演の来場者 ${fmtNum(totalCustomers)}名中` },
+      { label: "非全公演来場者数", value: fmtNum(notOverlapping) + "名", sub: "一部の公演のみに来場" },
+      { label: "非全公演来場者の割合", value: notPct + "%", sub: `選択中の公演の来場者 ${fmtNum(totalCustomers)}名中` },
+    ];
+    document.getElementById("overlapKpis").innerHTML = cards.map(c => `
+      <div class="kpi-card">
+        <div class="label">${c.label}</div>
+        <div class="value">${c.value}</div>
+        <div class="sub">${c.sub}</div>
+      </div>
+    `).join("");
+
+    renderTable("overlapCustomersTable", [
+      { key: "表示名", label: "氏名" },
+      { key: "来場回数", label: "来場回数", fmt: fmtNum },
+      { key: "初回来場", label: "初回来場" },
+      { key: "最終来場", label: "最終来場" },
+      { key: "参加公演", label: "参加公演", fmt: v => v.split(", ").map(shortEventLabel).join(" / ") },
+    ], overlapping);
+  });
+
+  // ファンの離脱・獲得(過去3か月ベース、お目当てでフィルタ可能)
+  safe("fanChurn", () => renderFanChurnSection(records));
+
+  // データ品質
+  safe("qualityPerformerTable", () => renderTable("qualityPerformerTable", [
+    { key: "候補A", label: "候補A" },
+    { key: "候補B", label: "候補B" },
+    { key: "類似度", label: "類似度" },
+  ], result.quality.performerDupe));
+  safe("qualityTicketTable", () => renderTable("qualityTicketTable", [
+    { key: "候補A", label: "候補A" },
+    { key: "候補B", label: "候補B" },
+    { key: "類似度", label: "類似度" },
+  ], result.quality.ticketTypeDupe));
+
+  safe("missingSummary", () => {
+    const m = result.quality.missing;
+    document.getElementById("missingSummary").innerHTML =
+      `Email欠損: <strong>${m.email}</strong>件 / 都道府県欠損: <strong>${m.prefecture}</strong>件 / 年齢欠損: <strong>${m.age}</strong>件 / 性別欠損: <strong>${m.gender}</strong>件`;
+  });
+}
+
+// ---------------------------------------------------------------------
+// ファンの離脱・獲得: お目当て(出演者)フィルタ
+// このセクションだけ、対象とする「お目当て」を選択式で絞り込めるようにする。
+// (例: 自分のグループのファンの動向だけを見たい、など)
+// ---------------------------------------------------------------------
+
+function updateFanChurnPerformerFilter(records) {
+  // 選択肢はグットクルー、スイモアマイモン！の2つのみに固定。件数表示のためにカウントだけ集計する。
+  const counts = new Map();
+  records.forEach((r) => {
+    const name = normStr(r["お目当て"]);
+    if (!name) return;
+    counts.set(name, (counts.get(name) || 0) + 1);
+  });
+
+  if (!fanPerformerDefaultsApplied) {
+    // 初回のみ両方をデフォルトで選択状態にする
+    FAN_PERFORMER_OPTIONS.forEach((name) => selectedFanPerformers.add(name));
+    fanPerformerDefaultsApplied = true;
+  }
+
+  const list = document.getElementById("fanChurnPerformerList");
+  list.innerHTML = FAN_PERFORMER_OPTIONS.map((name) => `
+    <label class="event-check-row">
+      <input type="checkbox" class="fan-performer-checkbox" data-performer="${escapeHtml(name)}" ${selectedFanPerformers.has(name) ? "checked" : ""}>
+      ${escapeHtml(name)}(${fmtNum(counts.get(name) || 0)}件)
+    </label>`).join("");
+
+  list.querySelectorAll(".fan-performer-checkbox").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const name = cb.dataset.performer;
+      if (cb.checked) selectedFanPerformers.add(name);
+      else selectedFanPerformers.delete(name);
+      renderFanChurnSection(lastRenderedRecords);
+    });
+  });
+}
+
+function renderFanChurnSection(records) {
+  lastRenderedRecords = records;
+  updateFanChurnPerformerFilter(records);
+
+  const bodyEl = document.getElementById("fanChurnBody");
+  const emptyEl = document.getElementById("fanChurnEmpty");
+
+  if (!selectedFanPerformers.size) {
+    bodyEl.classList.add("hidden");
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+  bodyEl.classList.remove("hidden");
+  emptyEl.classList.add("hidden");
+
+  const churnRecords = records.filter((r) => selectedFanPerformers.has(normStr(r["お目当て"])));
+  const fc = buildFanChurn(churnRecords, 3);
+  const netChange = fc.acquired.length - fc.churned.length;
+  const descEl = document.getElementById("fanChurnDesc");
+  if (descEl) {
+    descEl.textContent = fc.referenceDate
+      ? `分析基準日: ${fc.referenceDate}(選択中のお目当てのデータ内で最新の申込日) / 直近${fc.months}か月の区切り: ${fc.cutoffDate}以降`
+      : "日付データが不足しているため分析できません";
+  }
+  const cards = [
+    { label: "離脱ファン数", value: fmtNum(fc.churned.length) + "名", sub: `直近${fc.months}か月来場なし` },
+    { label: "新規獲得ファン数", value: fmtNum(fc.acquired.length) + "名", sub: `直近${fc.months}か月で初来場` },
+    { label: "アクティブファン数", value: fmtNum(fc.activeCount) + "名", sub: `直近${fc.months}か月以内に来場あり` },
+    { label: "純増減", value: (netChange >= 0 ? "+" : "") + fmtNum(netChange) + "名", sub: "獲得 − 離脱" },
+  ];
+  document.getElementById("fanChurnKpis").innerHTML = cards.map(c => `
+    <div class="kpi-card">
+      <div class="label">${c.label}</div>
+      <div class="value">${c.value}</div>
+      <div class="sub">${c.sub}</div>
+    </div>
+  `).join("");
+
+  renderTable("churnedTable", [
+    { key: "表示名", label: "氏名" },
+    { key: "来場回数", label: "累計来場回数", fmt: fmtNum },
+    { key: "最終来場日", label: "最終来場日" },
+    { key: "経過月数", label: "経過月数", fmt: v => v + "か月" },
+  ], fc.churned.slice(0, 50));
+
+  renderTable("acquiredTable", [
+    { key: "表示名", label: "氏名" },
+    { key: "初回来場日", label: "初回来場日" },
+    { key: "現在までの来場回数", label: "現在までの来場回数", fmt: fmtNum },
+  ], fc.acquired.slice(0, 50));
+}
+
+// ---------------------------------------------------------------------
+// ブラウザ内データ蓄積(localStorage)
+// 一度読み込んだCSVの生データをこのブラウザに保存しておき、次回アクセス時に
+// 自動で復元する。CSVを毎回アップロードし直さなくても済むようにするための機能。
+// 保存先はあくまで「このブラウザ(この端末・このブラウザアプリ)」のlocalStorageなので、
+// 別の端末やブラウザからは見えない。共有パソコンなどでは「すべて削除」で消せる。
+// ---------------------------------------------------------------------
+
+function getFileIndex() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_INDEX_KEY) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
+function setFileIndex(names) {
+  localStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify(names));
+}
+
+function persistFile(filename, rawRows) {
+  try {
+    localStorage.setItem(STORAGE_PREFIX + "file:" + filename, JSON.stringify(rawRows));
+    const names = getFileIndex();
+    if (!names.includes(filename)) {
+      names.push(filename);
+      setFileIndex(names);
+    }
+    return true;
+  } catch (e) {
+    console.error("localStorageへの保存に失敗しました:", e);
+    showStorageWarning(
+      e && e.name === "QuotaExceededError"
+        ? "ブラウザの保存容量の上限に達したため、このファイルは保存できませんでした。不要なファイルを削除してから再度お試しください。"
+        : "ブラウザへのデータ保存に失敗しました。表示自体は今回のセッション中のみ有効です。"
+    );
+    return false;
+  }
+}
+
+function removeStoredFile(filename) {
+  localStorage.removeItem(STORAGE_PREFIX + "file:" + filename);
+  setFileIndex(getFileIndex().filter(n => n !== filename));
+}
+
+function clearAllStoredFiles() {
+  getFileIndex().forEach(n => localStorage.removeItem(STORAGE_PREFIX + "file:" + n));
+  setFileIndex([]);
+}
+
+function showStorageWarning(message) {
+  const el = document.getElementById("fileList");
+  const warn = document.createElement("div");
+  warn.style.cssText = "color:#d1453b; margin-top:6px;";
+  warn.textContent = "⚠ " + message;
+  el.appendChild(warn);
+}
+
+function loadPersistedData() {
+  const names = getFileIndex();
+  names.forEach(filename => {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STORAGE_PREFIX + "file:" + filename) || "null");
+      if (!raw) return;
+      filesData.set(filename, loadEventRows(raw, filename));
+    } catch (e) {
+      console.error("保存済みデータの読み込みに失敗しました:", filename, e);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------
+// ファイル一覧UI・全体の再描画
+// ---------------------------------------------------------------------
+
+function updateFileList() {
+  const el = document.getElementById("fileList");
+  const names = Array.from(filesData.keys());
+  if (!names.length) {
+    el.innerHTML = '<div class="muted-note">保存されているデータはありません</div>';
+    return;
+  }
+  el.innerHTML =
+    names.map(name => `
+      <div class="file-row">
+        <span>✓ ${name}</span>
+        <button type="button" class="file-remove-btn" data-filename="${name}">削除</button>
+      </div>
+    `).join("") +
+    `<button type="button" id="clearAllBtn" class="upload-btn" style="margin-top:10px; background:#8a8f98;">すべて削除</button>`;
+
+  el.querySelectorAll(".file-remove-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.filename;
+      filesData.delete(name);
+      removeStoredFile(name);
+      updateFileList();
+      recomputeAndRender();
+    });
+  });
+  const clearBtn = document.getElementById("clearAllBtn");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      filesData.clear();
+      clearAllStoredFiles();
+      updateFileList();
+      recomputeAndRender();
+    });
+  }
+}
+
+// イベントキー "会場_YYYY-MM-DD_HHMM" から "YYYY-MM" (開催月)を取り出す。
+// 開催日目安(=最終申込日時)ベースの月なので、loadEventRows/eventOrderと一致する。
+function eventMonthKey(ev) {
+  const m = ev.match(/(\d{4})-(\d{2})-\d{2}_\d{4}$/);
+  return m ? `${m[1]}-${m[2]}` : "不明";
+}
+
+function monthLabel(monthKey) {
+  if (monthKey === "不明") return "開催月不明";
+  const [y, mo] = monthKey.split("-");
+  return `${y}年${parseInt(mo, 10)}月`;
+}
+
+function updateEventSelector() {
+  const all = [].concat(...filesData.values());
+  const events = eventOrder(all); // 開催順(古い順)
+  const currentKeys = new Set(events);
+
+  // 新しく読み込まれたイベントはデフォルトで選択状態にする
+  events.forEach(ev => {
+    if (!knownEventKeys.has(ev)) {
+      knownEventKeys.add(ev);
+      selectedEvents.add(ev);
+    }
+  });
+  // ファイル削除などでなくなったイベントは選択状態からも掃除する
+  Array.from(knownEventKeys).forEach(ev => {
+    if (!currentKeys.has(ev)) {
+      knownEventKeys.delete(ev);
+      selectedEvents.delete(ev);
+    }
+  });
+
+  const section = document.getElementById("eventSelectorSection");
+  const list = document.getElementById("eventCheckboxList");
+
+  if (!events.length) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+
+  // 開催月ごとにグループ化(新しい月が上に来るように降順で並べる)
+  const monthGroups = new Map(); // monthKey -> event[]
+  events.forEach(ev => {
+    const mk = eventMonthKey(ev);
+    if (!monthGroups.has(mk)) monthGroups.set(mk, []);
+    monthGroups.get(mk).push(ev);
+  });
+  const sortedMonthKeys = Array.from(monthGroups.keys()).sort().reverse();
+
+  list.innerHTML = sortedMonthKeys.map((mk, idx) => {
+    const evs = monthGroups.get(mk).slice().reverse(); // 各月内も新しい順
+    const openAttr = idx < 2 ? "open" : ""; // 直近2か月分は開いた状態で表示
+    const rows = evs.map(ev => `
+      <label class="event-check-row">
+        <input type="checkbox" class="event-checkbox" data-event="${escapeHtml(ev)}" ${selectedEvents.has(ev) ? "checked" : ""}>
+        ${escapeHtml(shortEventLabel(ev))}
+      </label>`).join("");
+    return `
+      <details class="month-group" ${openAttr}>
+        <summary>
+          <span>${escapeHtml(monthLabel(mk))}(${evs.length}件)</span>
+          <span class="month-actions">
+            <button type="button" class="link-btn month-select-all" data-month="${escapeHtml(mk)}">この月を全選択</button>
+            <button type="button" class="link-btn month-select-none" data-month="${escapeHtml(mk)}">この月を全解除</button>
+          </span>
+        </summary>
+        <div class="month-events">${rows}</div>
+      </details>`;
+  }).join("");
+
+  list.querySelectorAll(".event-checkbox").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const ev = cb.dataset.event;
+      if (cb.checked) selectedEvents.add(ev);
+      else selectedEvents.delete(ev);
+      applyFilterAndRender();
+    });
+  });
+
+  list.querySelectorAll(".month-select-all").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      (monthGroups.get(btn.dataset.month) || []).forEach(ev => selectedEvents.add(ev));
+      updateEventSelector();
+      applyFilterAndRender();
+    });
+  });
+  list.querySelectorAll(".month-select-none").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      (monthGroups.get(btn.dataset.month) || []).forEach(ev => selectedEvents.delete(ev));
+      updateEventSelector();
+      applyFilterAndRender();
+    });
+  });
+}
+
+function applyFilterAndRender() {
+  const all = [].concat(...filesData.values());
+  const emptyEl = document.getElementById("emptyState");
+
+  if (!all.length) {
+    document.getElementById("dashboard").classList.add("hidden");
+    emptyEl.textContent = "CSVファイルをアップロードすると分析結果が表示されます。";
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+
+  const filtered = all.filter(r => selectedEvents.has(r.event));
+  if (!filtered.length) {
+    document.getElementById("dashboard").classList.add("hidden");
+    emptyEl.textContent = "選択されている公演がありません。上の「分析対象の公演を選択」でチェックを入れてください。";
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+
+  emptyEl.classList.add("hidden");
+  renderAll(filtered);
+}
+
+function recomputeAndRender() {
+  updateEventSelector();
+  applyFilterAndRender();
+}
+
+function checkLibraries() {
+  const missing = [];
+  if (typeof Papa === "undefined") missing.push("PapaParse");
+  if (typeof Chart === "undefined") missing.push("Chart.js");
+  const banner = document.getElementById("libError");
+  if (missing.length) {
+    banner.classList.add("show");
+    console.error("必要なライブラリが読み込めていません:", missing.join(", "));
+    return false;
+  }
+  banner.classList.remove("show");
+  return true;
+}
+
+function handleFiles(fileList) {
+  if (!checkLibraries()) return;
+  const files = Array.from(fileList).filter(f => f.name.toLowerCase().endsWith(".csv"));
+  if (!files.length) return;
+
+  let pending = files.length;
+  files.forEach(file => {
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      encoding: "UTF-8",
+      complete: (res) => {
+        const recs = loadEventRows(res.data, file.name);
+        filesData.set(file.name, recs);
+        persistFile(file.name, res.data);
+        pending--;
+        if (pending === 0) {
+          updateFileList();
+          recomputeAndRender();
+        }
+      },
+      error: (err) => {
+        console.error("CSV parse error:", file.name, err);
+        pending--;
+      },
+    });
+  });
+}
+
+checkLibraries();
+loadPersistedData();
+updateFileList();
+recomputeAndRender();
+
+const uploadBox = document.getElementById("uploadBox");
+const fileInput = document.getElementById("fileInput");
+
+fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
+
+["dragenter", "dragover"].forEach(evt => {
+  uploadBox.addEventListener(evt, (e) => { e.preventDefault(); uploadBox.classList.add("dragover"); });
+});
+["dragleave", "drop"].forEach(evt => {
+  uploadBox.addEventListener(evt, (e) => { e.preventDefault(); uploadBox.classList.remove("dragover"); });
+});
+uploadBox.addEventListener("drop", (e) => {
+  if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+});
+
+document.getElementById("selectAllEventsBtn").addEventListener("click", () => {
+  knownEventKeys.forEach(ev => selectedEvents.add(ev));
+  updateEventSelector();
+  applyFilterAndRender();
+});
+document.getElementById("selectNoneEventsBtn").addEventListener("click", () => {
+  selectedEvents.clear();
+  updateEventSelector();
+  applyFilterAndRender();
+});
+</script>
+</body>
+</html>
