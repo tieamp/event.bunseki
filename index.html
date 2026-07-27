@@ -397,41 +397,8 @@ function buildDemographics(records) {
   };
 }
 
-function buildPaymentAnalysis(records) {
-  const byMethod = groupBy(
-    records.filter((r) => r.支払い方法),
-    (r) => r.支払い方法
-  );
-  const rows = [];
-  for (const [method, sub] of byMethod.entries()) {
-    const issued = sub.filter((r) => r.ステータス === STATUS_ISSUED).length;
-    const expired = sub.length - issued;
-    rows.push({
-      支払い方法: method,
-      件数: sub.length,
-      発券済み: issued,
-      期限切れ_未発券: expired,
-      期限切れ率: sub.length ? Math.round((expired / sub.length) * 1000) / 10 : 0,
-    });
-  }
-  rows.sort((a, b) => b.件数 - a.件数);
-  return rows;
-}
-
-const DOW_LABEL_JA = ["日", "月", "火", "水", "木", "金", "土"];
-
 function buildTimingAnalysis(records) {
   const withDate = records.filter((r) => r.申込日時);
-  const dowCounts = new Array(7).fill(0);
-  const hourCounts = new Array(24).fill(0);
-  for (const r of withDate) {
-    dowCounts[r.申込日時.getDay()]++;
-    hourCounts[r.申込日時.getHours()]++;
-  }
-  // 月曜始まりに並べ替え
-  const dowOrderIdx = [1, 2, 3, 4, 5, 6, 0];
-  const dow = dowOrderIdx.map((i) => ({ label: DOW_LABEL_JA[i], count: dowCounts[i] }));
-  const hour = hourCounts.map((c, h) => ({ label: `${h}時`, count: c }));
 
   const order = eventOrder(withDate);
   const byEvent = groupBy(withDate, (r) => r.event);
@@ -440,9 +407,15 @@ function buildTimingAnalysis(records) {
     const dates = sub.map((r) => r.申込日時).sort((a, b) => a - b);
     const start = dates[0].getTime();
     const total = sub.length;
+    // 発売開始からの経過時間(分)以内に申込があった件数(=初速)
     const within = (minutes) => sub.filter((r) => (r.申込日時.getTime() - start) / 60000 <= minutes).length;
+    const pct = (count) => (total ? Math.round((count / total) * 1000) / 10 : 0);
 
-    // 開催日目安(=最終申込日)を基準にした「前日」「当日」の申込集中度。
+    const count10min = within(10);
+    const count1hour = within(60);
+    const count1day = within(1440);
+
+    // 開催日目安(=最終申込日)を基準にした「前日」「当日」の申込集中度(かけこみ率)。
     // 発売開始からの経過時間(初速)とは逆に、公演直前にどれだけ駆け込み申込があったかを見る指標。
     const eventDay = dates[dates.length - 1];
     const eventDayStr = formatLocalDate(eventDay);
@@ -456,17 +429,22 @@ function buildTimingAnalysis(records) {
     return {
       公演: ev,
       申込件数: total,
-      "10分以内": total ? Math.round((within(10) / total) * 1000) / 10 : 0,
-      "1時間以内": total ? Math.round((within(60) / total) * 1000) / 10 : 0,
-      "1日以内": total ? Math.round((within(1440) / total) * 1000) / 10 : 0,
+      "10分以内件数": count10min,
+      "10分以内": pct(count10min),
+      "1時間以内件数": count1hour,
+      "1時間以内": pct(count1hour),
+      "1日以内件数": count1day,
+      "1日以内": pct(count1day),
       前日件数: dayBeforeCount,
-      前日率: total ? Math.round((dayBeforeCount / total) * 1000) / 10 : 0,
+      前日率: pct(dayBeforeCount),
       当日件数: dayOfCount,
-      当日率: total ? Math.round((dayOfCount / total) * 1000) / 10 : 0,
+      当日率: pct(dayOfCount),
+      かけこみ件数: dayBeforeCount + dayOfCount,
+      かけこみ率: pct(dayBeforeCount + dayOfCount),
     };
   });
 
-  return { dow, hour, speed };
+  return { speed };
 }
 
 function buildDataQuality(records) {
@@ -492,7 +470,6 @@ function runFullAnalysis(records) {
     performerSummary: buildPerformerSummary(records),
     performerOverlap: buildPerformerOverlap(records),
     demographics: buildDemographics(records),
-    payment: buildPaymentAnalysis(records),
     timing: buildTimingAnalysis(records),
     quality: buildDataQuality(records),
   };
@@ -509,7 +486,6 @@ if (typeof module !== "undefined") {
     buildPerformerSummary,
     buildPerformerOverlap,
     buildDemographics,
-    buildPaymentAnalysis,
     buildTimingAnalysis,
     buildDataQuality,
     findSimilarNames,
@@ -667,6 +643,22 @@ if (typeof module !== "undefined") {
   }
   .event-check-row input { cursor: pointer; }
   .event-selector-empty { font-size: 12px; color: var(--muted); }
+  .event-check-row-with-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .event-name-input {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 12px;
+    width: 150px;
+    background: #fff;
+    color: var(--text);
+  }
+  .event-name-input:focus { outline: 2px solid var(--primary-dark); outline-offset: 1px; }
+  .event-name-input::placeholder { color: var(--muted); }
 
   .performer-filter-box {
     background: #f7f9fd;
@@ -795,7 +787,7 @@ if (typeof module !== "undefined") {
         <button type="button" id="selectNoneEventsBtn" class="link-btn">すべて解除</button>
       </div>
     </div>
-    <div class="desc">チェックした公演のデータだけで、下のすべての分析・グラフを再集計します。単独ライブだけ選ぶことも、複数を組み合わせて選ぶこともできます。</div>
+    <div class="desc">チェックした公演のデータだけで、下のすべての分析・グラフを再集計します。単独ライブだけ選ぶことも、複数を組み合わせて選ぶこともできます。各公演の横のテキスト欄に名前を入力すると、その名前が表やグラフの公演ラベルとして使われます(ブラウザに保存され、次回も自動で復元されます)。</div>
     <div id="eventCheckboxList" class="event-checkbox-list"></div>
   </div>
 
@@ -816,6 +808,7 @@ if (typeof module !== "undefined") {
         <summary>項目の説明を見る</summary>
         <dl>
           <dt>公演</dt><dd>会場名と、その公演で最後にチケット申込があった日時(開催日の目安として使用。公演当日そのものではありません)</dd>
+          <dt>イベント名</dt><dd>下の「分析対象の公演を選択」欄で入力した、その公演の任意の表示名(未入力の場合は「-」)。入力すると表やグラフの公演ラベルとしても使われます</dd>
           <dt>開催日目安</dt><dd>その公演で最後にチケット申込があった日付。チケット販売終了に近いタイミングであり、実際の公演日の目安として使用</dd>
           <dt>申込開始日時</dt><dd>その公演でチケット申込の受付が最初に行われた日時(データ内の最も古い申込日時)</dd>
           <dt>申込終了日時</dt><dd>その公演で最後にチケット申込があった日時(データ内の最も新しい申込日時。「開催日目安」の元になった日時)</dd>
@@ -869,16 +862,22 @@ if (typeof module !== "undefined") {
     </section>
 
     <section class="panel">
-      <h2>決済方法・申込タイミング</h2>
-      <div class="desc">支払い方法別の期限切れ率、曜日・時間帯別の申込集中度、発売開始からの初速、開催前日・当日の駆け込み申込</div>
+      <h2>申込の初速・かけこみ率</h2>
+      <div class="desc">発売開始からの経過時間別の申込集中度(初速)と、開催直前(前日・当日)の駆け込み申込の割合(かけこみ率)</div>
+      <details class="legend">
+        <summary>項目の説明を見る</summary>
+        <dl>
+          <dt>初速(10分/1時間/1日以内)</dt><dd>その公演の申込受付開始時刻から、それぞれの時間以内に届いた申込の件数・割合。数値が高いほど発売直後に人気が集中したことを示す</dd>
+          <dt>前日・当日</dt><dd>開催日目安(最終申込日)の前日・当日にあった申込の件数・割合</dd>
+          <dt>かけこみ率</dt><dd>前日+当日の合計申込件数が、その公演の総申込件数に占める割合。開催直前の駆け込み申込の多さを示す</dd>
+        </dl>
+      </details>
       <div class="chart-grid">
-        <div class="chart-box"><canvas id="chartPayment"></canvas></div>
-        <div class="chart-box"><canvas id="chartDow"></canvas></div>
-        <div class="chart-box"><canvas id="chartHour"></canvas></div>
-        <div class="chart-box"><canvas id="chartSpeed"></canvas></div>
+        <div class="chart-box"><canvas id="chartSpeedEarly"></canvas></div>
+        <div class="chart-box"><canvas id="chartSpeedRush"></canvas></div>
       </div>
-      <h3 class="subhead" style="margin-top:18px">公演別 前日・当日の申込件数(開催日目安基準)</h3>
-      <div class="table-scroll" style="max-height:280px">
+      <h3 class="subhead" style="margin-top:18px">公演別 初速・かけこみ率 詳細</h3>
+      <div class="table-scroll" style="max-height:320px">
         <table id="timingSpeedDetailTable"></table>
       </div>
     </section>
@@ -950,6 +949,12 @@ const STORAGE_INDEX_KEY = STORAGE_PREFIX + "fileIndex";
 const knownEventKeys = new Set();
 const selectedEvents = new Set();
 
+// 各公演に手入力できる「イベント名」の状態。
+// キー: イベントキー(例: "会場_2026-06-24_1918")、値: ユーザーが入力した表示名
+// ブラウザのlocalStorageに保存され、次回アクセス時にも復元される
+const CUSTOM_EVENT_NAMES_KEY = STORAGE_PREFIX + "customEventNames";
+const customEventNames = new Map();
+
 // ファンの離脱・獲得セクション専用の「お目当て(出演者)」フィルタの状態。
 // 選択肢はグットクルー、スイモアマイモン！の2つのみに固定する。
 // selectedFanPerformers: 現在チェックが入っている(=分析対象の)出演者名の集合
@@ -997,6 +1002,34 @@ function shortEventLabel(ev) {
   if (!m) return ev;
   const [, venue, , mo, da, hh, mi] = m;
   return `${venue} ${parseInt(mo)}/${parseInt(da)} ${hh}:${mi}`;
+}
+
+// ユーザーが手入力したイベント名があればそれを、なければ自動生成ラベルを返す
+// (表やグラフの公演ラベルはすべてこの関数経由で表示する)
+function eventDisplayLabel(ev) {
+  const custom = customEventNames.get(ev);
+  return custom ? custom : shortEventLabel(ev);
+}
+
+function loadCustomEventNames() {
+  try {
+    const obj = JSON.parse(localStorage.getItem(CUSTOM_EVENT_NAMES_KEY) || "{}");
+    Object.entries(obj).forEach(([k, v]) => {
+      if (v) customEventNames.set(k, v);
+    });
+  } catch (e) {
+    console.error("イベント名の読み込みに失敗しました:", e);
+  }
+}
+
+function saveCustomEventNames() {
+  try {
+    const obj = {};
+    customEventNames.forEach((v, k) => { obj[k] = v; });
+    localStorage.setItem(CUSTOM_EVENT_NAMES_KEY, JSON.stringify(obj));
+  } catch (e) {
+    console.error("イベント名の保存に失敗しました:", e);
+  }
 }
 
 function updateKpis(result, recordCount) {
@@ -1052,6 +1085,7 @@ function renderAll(records) {
   // 公演サマリー表
   safe("eventSummaryTable", () => renderTable("eventSummaryTable", [
     { key: "公演", label: "会場", fmt: v => (v.match(/^(.*)_(\d{4}-\d{2}-\d{2}_\d{4})$/) || [null, v])[1] },
+    { key: "公演", label: "イベント名", fmt: v => customEventNames.get(v) || "-" },
     { key: "開催日目安", label: "開催日目安" },
     { key: "申込開始日時", label: "申込開始日時" },
     { key: "申込終了日時", label: "申込終了日時" },
@@ -1066,7 +1100,7 @@ function renderAll(records) {
 
   // 売上推移
   safe("chartRevenue", () => {
-    const evLabels = result.eventSummary.map(e => shortEventLabel(e.公演));
+    const evLabels = result.eventSummary.map(e => eventDisplayLabel(e.公演));
     makeChart("chartRevenue", {
       type: "bar",
       data: {
@@ -1085,7 +1119,7 @@ function renderAll(records) {
     makeChart("chartNewRepeat", {
       type: "bar",
       data: {
-        labels: result.newVsRepeat.map(e => shortEventLabel(e.公演)),
+        labels: result.newVsRepeat.map(e => eventDisplayLabel(e.公演)),
         datasets: [
           { label: "新規顧客数", data: result.newVsRepeat.map(e => e.新規顧客数), backgroundColor: CHART_COLORS[0], stack: "s" },
           { label: "リピーター数", data: result.newVsRepeat.map(e => e.リピーター数), backgroundColor: CHART_COLORS[1], stack: "s" },
@@ -1160,50 +1194,41 @@ function renderAll(records) {
     options: { indexAxis: "y", responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "券種分布" } } },
   }));
 
-  // 決済・タイミング
-  safe("chartPayment", () => makeChart("chartPayment", {
+  // 申込の初速・かけこみ率
+  safe("chartSpeedEarly", () => makeChart("chartSpeedEarly", {
     type: "bar",
     data: {
-      labels: result.payment.map(p => p.支払い方法),
-      datasets: [
-        { label: "発券済み", data: result.payment.map(p => p.発券済み), backgroundColor: CHART_COLORS[2], stack: "s" },
-        { label: "期限切れ/未発券", data: result.payment.map(p => p.期限切れ_未発券), backgroundColor: CHART_COLORS[4], stack: "s" },
-      ],
-    },
-    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "支払い方法別 発券状況" } } },
-  }));
-  safe("chartDow", () => makeChart("chartDow", {
-    type: "bar",
-    data: { labels: result.timing.dow.map(d => d.label), datasets: [{ label: "申込件数", data: result.timing.dow.map(d => d.count), backgroundColor: CHART_COLORS[0] }] },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "曜日別 申込件数" } } },
-  }));
-  safe("chartHour", () => makeChart("chartHour", {
-    type: "line",
-    data: { labels: result.timing.hour.map(h => h.label), datasets: [{ label: "申込件数", data: result.timing.hour.map(h => h.count), borderColor: CHART_COLORS[1], backgroundColor: CHART_COLORS[1] + "33", fill: true, tension: 0.3 }] },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "時間帯別 申込件数" } } },
-  }));
-  safe("chartSpeed", () => makeChart("chartSpeed", {
-    type: "bar",
-    data: {
-      labels: result.timing.speed.map(s => shortEventLabel(s.公演)),
+      labels: result.timing.speed.map(s => eventDisplayLabel(s.公演)),
       datasets: [
         { label: "10分以内(%)", data: result.timing.speed.map(s => s["10分以内"]), backgroundColor: CHART_COLORS[0] },
         { label: "1時間以内(%)", data: result.timing.speed.map(s => s["1時間以内"]), backgroundColor: CHART_COLORS[1] },
         { label: "1日以内(%)", data: result.timing.speed.map(s => s["1日以内"]), backgroundColor: CHART_COLORS[2] },
-        { label: "前日(%)", data: result.timing.speed.map(s => s.前日率), backgroundColor: CHART_COLORS[4] },
-        { label: "当日(%)", data: result.timing.speed.map(s => s.当日率), backgroundColor: CHART_COLORS[9] },
       ],
     },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 申込の初速(発売開始からの経過時間)と前日・当日の駆け込み率" } } },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 申込の初速(発売開始からの経過時間別割合)" } } },
+  }));
+  safe("chartSpeedRush", () => makeChart("chartSpeedRush", {
+    type: "bar",
+    data: {
+      labels: result.timing.speed.map(s => eventDisplayLabel(s.公演)),
+      datasets: [
+        { label: "前日(%)", data: result.timing.speed.map(s => s.前日率), backgroundColor: CHART_COLORS[4] },
+        { label: "当日(%)", data: result.timing.speed.map(s => s.当日率), backgroundColor: CHART_COLORS[9] },
+        { label: "かけこみ率(前日+当日, %)", data: result.timing.speed.map(s => s.かけこみ率), backgroundColor: CHART_COLORS[3] },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { title: { display: true, text: "公演別 開催直前の駆け込み率(前日・当日)" } } },
   }));
 
   safe("timingSpeedDetailTable", () => renderTable("timingSpeedDetailTable", [
-    { key: "公演", label: "公演", fmt: v => shortEventLabel(v) },
+    { key: "公演", label: "公演", fmt: v => eventDisplayLabel(v) },
     { key: "申込件数", label: "申込件数(合計)", fmt: fmtNum },
-    { key: "前日件数", label: "前日の申込件数", fmt: fmtNum },
-    { key: "前日率", label: "前日の割合", fmt: v => v + "%" },
-    { key: "当日件数", label: "当日の申込件数", fmt: fmtNum },
-    { key: "当日率", label: "当日の割合", fmt: v => v + "%" },
+    { key: "10分以内件数", label: "10分以内", fmt: (v, row) => `${fmtNum(v)}件(${row["10分以内"]}%)` },
+    { key: "1時間以内件数", label: "1時間以内", fmt: (v, row) => `${fmtNum(v)}件(${row["1時間以内"]}%)` },
+    { key: "1日以内件数", label: "1日以内", fmt: (v, row) => `${fmtNum(v)}件(${row["1日以内"]}%)` },
+    { key: "前日件数", label: "前日", fmt: (v, row) => `${fmtNum(v)}件(${row.前日率}%)` },
+    { key: "当日件数", label: "当日", fmt: (v, row) => `${fmtNum(v)}件(${row.当日率}%)` },
+    { key: "かけこみ件数", label: "かけこみ(前日+当日)", fmt: (v, row) => `${fmtNum(v)}件(${row.かけこみ率}%)` },
   ], result.timing.speed));
 
   // 顧客マスタ
@@ -1253,7 +1278,7 @@ function renderAll(records) {
       { key: "来場回数", label: "来場回数", fmt: fmtNum },
       { key: "初回来場", label: "初回来場" },
       { key: "最終来場", label: "最終来場" },
-      { key: "参加公演", label: "参加公演", fmt: v => v.split(", ").map(shortEventLabel).join(" / ") },
+      { key: "参加公演", label: "参加公演", fmt: v => v.split(", ").map(eventDisplayLabel).join(" / ") },
     ], overlapping);
   });
 
@@ -1535,10 +1560,13 @@ function updateEventSelector() {
     const evs = monthGroups.get(mk).slice().reverse(); // 各月内も新しい順
     const openAttr = idx < 2 ? "open" : ""; // 直近2か月分は開いた状態で表示
     const rows = evs.map(ev => `
-      <label class="event-check-row">
-        <input type="checkbox" class="event-checkbox" data-event="${escapeHtml(ev)}" ${selectedEvents.has(ev) ? "checked" : ""}>
-        ${escapeHtml(shortEventLabel(ev))}
-      </label>`).join("");
+      <div class="event-check-row-with-name">
+        <label class="event-check-row">
+          <input type="checkbox" class="event-checkbox" data-event="${escapeHtml(ev)}" ${selectedEvents.has(ev) ? "checked" : ""}>
+          ${escapeHtml(shortEventLabel(ev))}
+        </label>
+        <input type="text" class="event-name-input" data-event="${escapeHtml(ev)}" placeholder="イベント名(任意)" value="${escapeHtml(customEventNames.get(ev) || "")}">
+      </div>`).join("");
     return `
       <details class="month-group" ${openAttr}>
         <summary>
@@ -1557,6 +1585,17 @@ function updateEventSelector() {
       const ev = cb.dataset.event;
       if (cb.checked) selectedEvents.add(ev);
       else selectedEvents.delete(ev);
+      applyFilterAndRender();
+    });
+  });
+
+  list.querySelectorAll(".event-name-input").forEach(inp => {
+    inp.addEventListener("change", () => {
+      const ev = inp.dataset.event;
+      const val = inp.value.trim();
+      if (val) customEventNames.set(ev, val);
+      else customEventNames.delete(ev);
+      saveCustomEventNames();
       applyFilterAndRender();
     });
   });
@@ -1653,6 +1692,7 @@ function handleFiles(fileList) {
 }
 
 checkLibraries();
+loadCustomEventNames();
 loadPersistedData();
 updateFileList();
 recomputeAndRender();
