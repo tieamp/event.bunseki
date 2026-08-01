@@ -1467,6 +1467,49 @@ function showStorageWarning(message) {
   el.appendChild(warn);
 }
 
+function showInfoMessage(message) {
+  const el = document.getElementById("fileList");
+  const info = document.createElement("div");
+  info.style.cssText = "color: var(--primary-dark); margin-top:6px;";
+  info.textContent = "ℹ " + message;
+  el.appendChild(info);
+}
+
+// 同じイベント(公演)を指す複数のCSVファイルが読み込まれている場合、
+// 最新のファイル(=直近でアップロードされたもの。既存の保存データ同士の場合は保存順で後のもの)だけを残し、
+// 古いファイルのデータはfilesDataとlocalStorageの両方から削除する。
+// priorityNames: 今回の処理で「新しい」とみなすべきファイル名の一覧(アップロード順)。
+// 省略時は、既存の保存データの中で読み込み順が後のものを新しいとみなす。
+function dedupeFilesByEvent(priorityNames) {
+  const eventToFiles = new Map(); // eventKey -> [filename, ...] (filesDataの挿入順)
+  filesData.forEach((recs, filename) => {
+    const evKey = recs.length ? recs[0].event : null;
+    if (!evKey) return;
+    if (!eventToFiles.has(evKey)) eventToFiles.set(evKey, []);
+    eventToFiles.get(evKey).push(filename);
+  });
+
+  const removed = [];
+  eventToFiles.forEach((filenames) => {
+    if (filenames.length <= 1) return;
+    let keep;
+    if (priorityNames && priorityNames.length) {
+      const uploadedOnes = filenames.filter(f => priorityNames.includes(f));
+      keep = uploadedOnes.length ? uploadedOnes[uploadedOnes.length - 1] : filenames[filenames.length - 1];
+    } else {
+      keep = filenames[filenames.length - 1];
+    }
+    filenames.forEach(f => {
+      if (f !== keep) {
+        filesData.delete(f);
+        removeStoredFile(f);
+        removed.push({ removed: f, keep });
+      }
+    });
+  });
+  return removed;
+}
+
 function loadPersistedData() {
   const names = getFileIndex();
   names.forEach(filename => {
@@ -1478,6 +1521,8 @@ function loadPersistedData() {
       console.error("保存済みデータの読み込みに失敗しました:", filename, e);
     }
   });
+  // 過去に保存された中に同じイベントを指す重複ファイルがあれば、後から保存された方だけ残す
+  dedupeFilesByEvent();
 }
 
 // ---------------------------------------------------------------------
@@ -1683,6 +1728,7 @@ function handleFiles(fileList) {
   if (!files.length) return;
 
   let pending = files.length;
+  const uploadedNames = files.map(f => f.name);
   files.forEach(file => {
     Papa.parse(file, {
       header: true,
@@ -1694,7 +1740,13 @@ function handleFiles(fileList) {
         persistFile(file.name, res.data);
         pending--;
         if (pending === 0) {
+          // 今回アップロードしたファイルが既存の(同じイベントの)ファイルより新しい情報として優先される
+          const removed = dedupeFilesByEvent(uploadedNames);
           updateFileList();
+          if (removed.length) {
+            const summary = removed.map(r => `「${r.removed}」→「${r.keep}」`).join(", ");
+            showInfoMessage(`同じ公演のデータが重複していたため、新しい方に更新しました: ${summary}`);
+          }
           recomputeAndRender();
         }
       },
