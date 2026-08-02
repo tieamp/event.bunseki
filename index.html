@@ -92,6 +92,7 @@ function normalizeRow(row, venue, dateLabel, sourceFile) {
     申込日時: row["申込日時"] ? new Date(row["申込日時"].replace(" ", "T")) : null,
     申込者本名: name,
     申込者Email: email,
+    申込者電話番号: phone,
     申込者性別: normStr(row["申込者性別"]),
     申込者年齢: row["申込者年齢"] !== undefined && row["申込者年齢"] !== "" ? toNum(row["申込者年齢"], null) : null,
     申込者都道府県: normStr(row["申込者都道府県"]),
@@ -263,14 +264,23 @@ function buildFanChurn(records, months = 3) {
     const last = rows.find((r) => r.申込日時.getTime() === lastVisit.getTime()) || rows[0];
 
     if (lastVisit < cutoffDate) {
-      // 直近Nヶ月に来場履歴がない = 離脱ファン
+      // 直近Nヶ月に来場履歴がない = 離脱ファン(再アプローチ用に詳細項目まで記録する)
       const monthsSince = Math.round(((referenceDate - lastVisit) / (1000 * 60 * 60 * 24 * 30.44)) * 10) / 10;
       churned.push({
         表示名: last.申込者本名,
         Email: last.申込者Email,
+        電話番号: last.申込者電話番号,
+        性別: last.申込者性別,
+        年齢: last.申込者年齢,
+        都道府県: last.申込者都道府県,
+        直近のお目当て: last.お目当て,
         来場回数: visitCount,
+        初回来場日: formatLocalDate(firstVisit),
         最終来場日: formatLocalDate(lastVisit),
         経過月数: monthsSince,
+        累計枚数: sum(rows, (r) => r.申込枚数),
+        累計金額: sum(rows, (r) => r.金額),
+        参加公演: Array.from(new Set(rows.map((r) => r.event))).sort().join(", "),
       });
     } else {
       activeCount++;
@@ -908,10 +918,13 @@ if (typeof module !== "undefined") {
     </section>
 
     <section class="panel">
-      <h2>選択公演すべてに来場した重複顧客</h2>
-      <div class="desc">現在選択されている公演の「すべて」に来場した顧客(発券済みチケットのみ集計)。公演を2つ以上選択している場合のみ集計されます。</div>
+      <h2>選択公演の重複顧客</h2>
+      <div class="desc">選択中の公演に来場したユニーク顧客のうち、重複来場(2公演以上)の人数・割合と、来場回数別の内訳、選択公演すべてに来場した顧客の一覧です(発券済みチケットのみ集計)。公演を2つ以上選択している場合のみ集計されます。</div>
       <div id="overlapBody">
         <div class="kpi-grid" id="overlapKpis"></div>
+        <h3 class="subhead" style="margin-top:18px">来場回数別の人数・割合</h3>
+        <div class="table-scroll" style="max-height:240px"><table id="visitCountBreakdownTable"></table></div>
+        <h3 class="subhead" style="margin-top:18px">選択公演すべてに来場した顧客一覧</h3>
         <div class="table-scroll" style="max-height:360px"><table id="overlapCustomersTable"></table></div>
       </div>
       <div id="overlapEmpty" class="event-selector-empty hidden">公演を2つ以上選択すると集計されます。</div>
@@ -1255,7 +1268,7 @@ function renderAll(records) {
     { key: "参加公演", label: "参加公演" },
   ], result.customerMaster.slice(0, 30)));
 
-  // 選択公演すべてに来場した重複顧客(公演を2つ以上選択している場合のみ集計)
+  // 選択公演の重複顧客(公演を2つ以上選択している場合のみ集計)
   safe("overlapCustomers", () => {
     const totalEventCount = new Set(records.filter((r) => r.ステータス === "発券済み").map((r) => r.event)).size;
     const overlapEmptyEl = document.getElementById("overlapEmpty");
@@ -1270,15 +1283,16 @@ function renderAll(records) {
     overlapEmptyEl.classList.add("hidden");
 
     const totalCustomers = result.customerMaster.length;
-    const overlapping = result.customerMaster.filter((c) => c.来場回数 === totalEventCount);
-    const notOverlapping = totalCustomers - overlapping.length;
-    const pct = totalCustomers ? Math.round((overlapping.length / totalCustomers) * 1000) / 10 : 0;
-    const notPct = totalCustomers ? Math.round((notOverlapping / totalCustomers) * 1000) / 10 : 0;
+    const dupCustomers = result.customerMaster.filter((c) => c.来場回数 >= 2);
+    const allEventCustomers = result.customerMaster.filter((c) => c.来場回数 === totalEventCount);
+    const pct = (n) => totalCustomers ? Math.round((n / totalCustomers) * 1000) / 10 : 0;
+
     const cards = [
-      { label: "全公演来場者数", value: fmtNum(overlapping.length) + "名", sub: `選択中の${fmtNum(totalEventCount)}公演すべてに来場` },
-      { label: "全公演来場者の割合", value: pct + "%", sub: `選択中の公演の来場者 ${fmtNum(totalCustomers)}名中` },
-      { label: "非全公演来場者数", value: fmtNum(notOverlapping) + "名", sub: "一部の公演のみに来場" },
-      { label: "非全公演来場者の割合", value: notPct + "%", sub: `選択中の公演の来場者 ${fmtNum(totalCustomers)}名中` },
+      { label: "ユニーク来場者数", value: fmtNum(totalCustomers) + "名", sub: `選択中の${fmtNum(totalEventCount)}公演の合計` },
+      { label: "重複顧客数(2公演以上)", value: fmtNum(dupCustomers.length) + "名", sub: "選択公演のうち2公演以上に来場" },
+      { label: "重複顧客の割合", value: pct(dupCustomers.length) + "%", sub: `ユニーク来場者 ${fmtNum(totalCustomers)}名中` },
+      { label: "全公演来場者数", value: fmtNum(allEventCustomers.length) + "名", sub: `選択中の${fmtNum(totalEventCount)}公演すべてに来場` },
+      { label: "全公演来場者の割合", value: pct(allEventCustomers.length) + "%", sub: `ユニーク来場者 ${fmtNum(totalCustomers)}名中` },
     ];
     document.getElementById("overlapKpis").innerHTML = cards.map(c => `
       <div class="kpi-card">
@@ -1288,13 +1302,33 @@ function renderAll(records) {
       </div>
     `).join("");
 
+    // 来場回数別(1回〜選択公演すべて)の人数・割合
+    const countMap = new Map();
+    result.customerMaster.forEach((c) => {
+      countMap.set(c.来場回数, (countMap.get(c.来場回数) || 0) + 1);
+    });
+    const breakdownRows = [];
+    for (let n = 1; n <= totalEventCount; n++) {
+      const cnt = countMap.get(n) || 0;
+      breakdownRows.push({
+        来場回数: n === totalEventCount ? `${n}回(選択公演すべて)` : `${n}回`,
+        人数: cnt,
+        割合: pct(cnt),
+      });
+    }
+    renderTable("visitCountBreakdownTable", [
+      { key: "来場回数", label: "来場回数" },
+      { key: "人数", label: "人数", fmt: fmtNum },
+      { key: "割合", label: "割合", fmt: v => v + "%" },
+    ], breakdownRows);
+
     renderTable("overlapCustomersTable", [
       { key: "表示名", label: "氏名" },
       { key: "来場回数", label: "来場回数", fmt: fmtNum },
       { key: "初回来場", label: "初回来場" },
       { key: "最終来場", label: "最終来場" },
       { key: "参加公演", label: "参加公演", fmt: v => v.split(", ").map(eventDisplayLabel).join(" / ") },
-    ], overlapping);
+    ], allEventCustomers);
   });
 
   // ファンの離脱・獲得(過去3か月ベース、お目当てでフィルタ可能)
@@ -1397,10 +1431,20 @@ function renderFanChurnSection(records) {
 
   renderTable("churnedTable", [
     { key: "表示名", label: "氏名" },
+    { key: "Email", label: "Email" },
+    { key: "電話番号", label: "電話番号" },
+    { key: "性別", label: "性別", fmt: v => v || "-" },
+    { key: "年齢", label: "年齢", fmt: v => v === null || v === undefined ? "-" : v },
+    { key: "都道府県", label: "都道府県", fmt: v => v || "-" },
+    { key: "直近のお目当て", label: "直近のお目当て", fmt: v => v || "-" },
     { key: "来場回数", label: "累計来場回数", fmt: fmtNum },
+    { key: "初回来場日", label: "初回来場日" },
     { key: "最終来場日", label: "最終来場日" },
-    { key: "経過月数", label: "経過月数", fmt: v => v + "か月" },
-  ], fc.churned.slice(0, 50));
+    { key: "経過月数", label: "最終来場からの経過月数", fmt: v => v + "か月" },
+    { key: "累計枚数", label: "累計枚数", fmt: fmtNum },
+    { key: "累計金額", label: "累計金額", fmt: v => "¥" + fmtNum(v) },
+    { key: "参加公演", label: "参加公演(全期間)", fmt: v => v.split(", ").map(eventDisplayLabel).join(" / ") },
+  ], fc.churned);
 
   renderTable("acquiredTable", [
     { key: "表示名", label: "氏名" },
