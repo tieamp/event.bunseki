@@ -298,7 +298,7 @@ function buildFanChurn(records, months = 3) {
   }
 
   churned.sort((a, b) => b.経過月数 - a.経過月数);
-  acquired.sort((a, b) => (b.初回来場日 || "").localeCompare(a.初回来場日 || ""));
+  acquired.sort((a, b) => b.現在までの来場回数 - a.現在までの来場回数 || (b.初回来場日 || "").localeCompare(a.初回来場日 || ""));
 
   return {
     referenceDate: formatLocalDate(referenceDate),
@@ -856,12 +856,22 @@ if (typeof module !== "undefined") {
     </section>
 
     <section class="panel">
-      <h2>売上・新規vsリピーターの推移</h2>
+      <h2>売上の推移</h2>
       <div class="desc">公演の開催順に並べています</div>
-      <div class="chart-grid">
-        <div class="chart-box"><canvas id="chartRevenue"></canvas></div>
+      <div class="chart-box"><canvas id="chartRevenue"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <h2>新規vsリピーターの推移</h2>
+      <div class="desc">公演の開催順に、新規顧客数とリピーター数の推移を表示します</div>
+      <div class="performer-filter-box">
+        <div class="desc" style="margin-bottom:6px">対象にするお目当て(出演者)を選択(チェックした出演者を目当てに申込んだ人だけを分析対象にします):</div>
+        <div id="newRepeatPerformerList" class="event-checkbox-list performer-checkbox-list"></div>
+      </div>
+      <div id="newRepeatBody">
         <div class="chart-box"><canvas id="chartNewRepeat"></canvas></div>
       </div>
+      <div id="newRepeatEmpty" class="event-selector-empty hidden">対象の出演者が選択されていません。上のチェックボックスで1つ以上選んでください。</div>
     </section>
 
     <section class="panel">
@@ -931,21 +941,27 @@ if (typeof module !== "undefined") {
     </section>
 
     <section class="panel">
-      <h2>ファンの離脱・獲得(過去3か月ベース)</h2>
-      <div class="desc" id="fanChurnDesc">データ内で最も新しい申込日を基準に、直近3か月の来場有無で「離脱」「新規獲得」を判定します</div>
+      <h2>ファンの離脱・獲得</h2>
+      <div class="desc" id="fanChurnDesc">データ内で最も新しい申込日を基準に、直近Nか月の来場有無で「離脱」「新規獲得」を判定します</div>
       <div class="performer-filter-box">
         <div class="desc" style="margin-bottom:6px">対象にするお目当て(出演者)を選択(チェックした出演者を目当てに申込んだ人だけを分析対象にします):</div>
         <div id="fanChurnPerformerList" class="event-checkbox-list performer-checkbox-list"></div>
+        <div class="desc" style="margin:12px 0 6px">離脱・新規獲得の判定期間(か月)を指定:</div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color: var(--text);">
+          直近
+          <input type="number" id="fanChurnMonthsInput" min="1" max="60" step="1" value="3" style="width:64px; padding:4px 8px; border:1px solid var(--border); border-radius:6px; font-size:13px;">
+          か月以内の来場有無で判定
+        </label>
       </div>
       <div id="fanChurnBody">
         <div class="kpi-grid" id="fanChurnKpis"></div>
         <div class="chart-grid">
           <div>
-            <h3 class="subhead">離脱ファン(過去3か月来場なし)</h3>
+            <h3 class="subhead" id="churnedTableTitle">離脱ファン</h3>
             <div class="table-scroll" style="max-height:320px"><table id="churnedTable"></table></div>
           </div>
           <div>
-            <h3 class="subhead">新規獲得ファン(過去3か月で初来場)</h3>
+            <h3 class="subhead" id="acquiredTableTitle">新規獲得ファン</h3>
             <div class="table-scroll" style="max-height:320px"><table id="acquiredTable"></table></div>
           </div>
         </div>
@@ -995,6 +1011,12 @@ const FAN_PERFORMER_OPTIONS = ["グットクルー", "スイモアマイモン�
 const selectedFanPerformers = new Set();
 let fanPerformerDefaultsApplied = false;
 let lastRenderedRecords = [];
+// 離脱・新規獲得の判定基準となる期間(か月)。ユーザーが数値入力欄で自由に変更できる
+let fanChurnMonths = 3;
+
+// 新規vsリピーターの推移セクション専用のお目当てフィルタの状態(選択肢はグットクルー、スイモアマイモン！の2つのみ)
+const selectedNewRepeatPerformers = new Set();
+let newRepeatPerformerDefaultsApplied = false;
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -1108,6 +1130,7 @@ function safe(label, fn) {
 }
 
 function renderAll(records) {
+  lastRenderedRecords = records;
   const result = runFullAnalysis(records);
   document.getElementById("emptyState").classList.add("hidden");
   document.getElementById("dashboard").classList.remove("hidden");
@@ -1146,20 +1169,8 @@ function renderAll(records) {
     });
   });
 
-  // 新規vsリピーター
-  safe("chartNewRepeat", () => {
-    makeChart("chartNewRepeat", {
-      type: "bar",
-      data: {
-        labels: result.newVsRepeat.map(e => eventDisplayLabel(e.公演)),
-        datasets: [
-          { label: "新規顧客数", data: result.newVsRepeat.map(e => e.新規顧客数), backgroundColor: CHART_COLORS[0], stack: "s" },
-          { label: "リピーター数", data: result.newVsRepeat.map(e => e.リピーター数), backgroundColor: CHART_COLORS[1], stack: "s" },
-        ],
-      },
-      options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "公演別 新規顧客数 / リピーター数" } } },
-    });
-  });
+  // 新規vsリピーター(お目当てフィルタ対応)
+  safe("chartNewRepeat", () => renderNewRepeatSection(records));
 
   // 出演者別集客
   safe("chartPerformer", () => {
@@ -1407,7 +1418,7 @@ function renderFanChurnSection(records) {
   emptyEl.classList.add("hidden");
 
   const churnRecords = records.filter((r) => selectedFanPerformers.has(normStr(r["お目当て"])));
-  const fc = buildFanChurn(churnRecords, 3);
+  const fc = buildFanChurn(churnRecords, fanChurnMonths);
   const netChange = fc.acquired.length - fc.churned.length;
   const descEl = document.getElementById("fanChurnDesc");
   if (descEl) {
@@ -1415,6 +1426,11 @@ function renderFanChurnSection(records) {
       ? `分析基準日: ${fc.referenceDate}(選択中のお目当てのデータ内で最新の申込日) / 直近${fc.months}か月の区切り: ${fc.cutoffDate}以降`
       : "日付データが不足しているため分析できません";
   }
+  const churnedTitleEl = document.getElementById("churnedTableTitle");
+  if (churnedTitleEl) churnedTitleEl.textContent = `離脱ファン(過去${fc.months}か月来場なし)`;
+  const acquiredTitleEl = document.getElementById("acquiredTableTitle");
+  if (acquiredTitleEl) acquiredTitleEl.textContent = `新規獲得ファン(過去${fc.months}か月で初来場・来場回数順)`;
+
   const cards = [
     { label: "離脱ファン数", value: fmtNum(fc.churned.length) + "名", sub: `直近${fc.months}か月来場なし` },
     { label: "新規獲得ファン数", value: fmtNum(fc.acquired.length) + "名", sub: `直近${fc.months}か月で初来場` },
@@ -1448,9 +1464,75 @@ function renderFanChurnSection(records) {
 
   renderTable("acquiredTable", [
     { key: "表示名", label: "氏名" },
-    { key: "初回来場日", label: "初回来場日" },
     { key: "現在までの来場回数", label: "現在までの来場回数", fmt: fmtNum },
-  ], fc.acquired.slice(0, 50));
+    { key: "初回来場日", label: "初回来場日" },
+  ], fc.acquired);
+}
+
+// ---------------------------------------------------------------------
+// 新規vsリピーターの推移: お目当て(出演者)フィルタ
+// このグラフだけ、対象とする「お目当て」を選択式で絞り込めるようにする。
+// (fanChurnと同じくグットクルー、スイモアマイモン！の2択のみ)
+// ---------------------------------------------------------------------
+
+function updateNewRepeatPerformerFilter(records) {
+  const counts = new Map();
+  records.forEach((r) => {
+    const name = normStr(r["お目当て"]);
+    if (!name) return;
+    counts.set(name, (counts.get(name) || 0) + 1);
+  });
+
+  if (!newRepeatPerformerDefaultsApplied) {
+    FAN_PERFORMER_OPTIONS.forEach((name) => selectedNewRepeatPerformers.add(name));
+    newRepeatPerformerDefaultsApplied = true;
+  }
+
+  const list = document.getElementById("newRepeatPerformerList");
+  list.innerHTML = FAN_PERFORMER_OPTIONS.map((name) => `
+    <label class="event-check-row">
+      <input type="checkbox" class="new-repeat-performer-checkbox" data-performer="${escapeHtml(name)}" ${selectedNewRepeatPerformers.has(name) ? "checked" : ""}>
+      ${escapeHtml(name)}(${fmtNum(counts.get(name) || 0)}件)
+    </label>`).join("");
+
+  list.querySelectorAll(".new-repeat-performer-checkbox").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const name = cb.dataset.performer;
+      if (cb.checked) selectedNewRepeatPerformers.add(name);
+      else selectedNewRepeatPerformers.delete(name);
+      renderNewRepeatSection(lastRenderedRecords);
+    });
+  });
+}
+
+function renderNewRepeatSection(records) {
+  updateNewRepeatPerformerFilter(records);
+
+  const bodyEl = document.getElementById("newRepeatBody");
+  const emptyEl = document.getElementById("newRepeatEmpty");
+
+  if (!selectedNewRepeatPerformers.size) {
+    bodyEl.classList.add("hidden");
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+  bodyEl.classList.remove("hidden");
+  emptyEl.classList.add("hidden");
+
+  const filtered = records.filter((r) => selectedNewRepeatPerformers.has(normStr(r["お目当て"])));
+  const nvr = buildNewVsRepeat(filtered);
+
+  makeChart("chartNewRepeat", {
+    type: "bar",
+    data: {
+      labels: nvr.map(e => eventDisplayLabel(e.公演)),
+      datasets: [
+        { label: "新規顧客数", data: nvr.map(e => e.新規顧客数), backgroundColor: CHART_COLORS[0], stack: "s" },
+        { label: "リピーター数", data: nvr.map(e => e.リピーター数), backgroundColor: CHART_COLORS[1], stack: "s" },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true } }, plugins: { title: { display: true, text: "公演別 新規顧客数 / リピーター数(選択中のお目当てのみ)" } } },
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -1832,6 +1914,13 @@ document.getElementById("selectNoneEventsBtn").addEventListener("click", () => {
   selectedEvents.clear();
   updateEventSelector();
   applyFilterAndRender();
+});
+
+document.getElementById("fanChurnMonthsInput").addEventListener("change", (e) => {
+  const v = parseInt(e.target.value, 10);
+  fanChurnMonths = Number.isFinite(v) && v >= 1 ? v : 3;
+  e.target.value = fanChurnMonths;
+  renderFanChurnSection(lastRenderedRecords);
 });
 </script>
 </body>
