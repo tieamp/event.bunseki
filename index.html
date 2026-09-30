@@ -690,6 +690,17 @@ if (typeof module !== "undefined") {
   }
   .event-name-input:focus { outline: 2px solid var(--primary-dark); outline-offset: 1px; }
   .event-name-input::placeholder { color: var(--muted); }
+  .event-delete-btn {
+    border: 1px solid var(--border);
+    background: #fff;
+    color: #d1453b;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .event-delete-btn:hover { background: #fdeceb; }
 
   .performer-filter-box {
     background: #f7f9fd;
@@ -803,7 +814,10 @@ if (typeof module !== "undefined") {
     <p><strong>ここにCSVファイルをドラッグ&ドロップ</strong>、またはボタンから選択してください(複数選択可)</p>
     <label class="upload-btn" for="fileInput">CSVファイルを選択</label>
     <input type="file" id="fileInput" accept=".csv" multiple>
-    <div class="file-list" id="fileList"></div>
+    <details class="legend" style="margin-top:14px; margin-bottom:0;">
+      <summary>読み込み済みCSVファイルの一覧・削除</summary>
+      <div class="file-list" id="fileList"></div>
+    </details>
   </div>
 
   <div class="privacy-note">
@@ -1752,6 +1766,7 @@ function updateEventSelector() {
           ${escapeHtml(shortEventLabel(ev))}
         </label>
         <input type="text" class="event-name-input" data-event="${escapeHtml(ev)}" placeholder="イベント名(任意)" value="${escapeHtml(customEventNames.get(ev) || "")}">
+        <button type="button" class="event-delete-btn" data-event="${escapeHtml(ev)}" title="このイベントのデータを削除">削除</button>
       </div>`).join("");
     return `
       <details class="month-group" ${openAttr}>
@@ -1786,6 +1801,12 @@ function updateEventSelector() {
     });
   });
 
+  list.querySelectorAll(".event-delete-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      deleteEvent(btn.dataset.event);
+    });
+  });
+
   list.querySelectorAll(".month-select-all").forEach(btn => {
     btn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -1804,6 +1825,25 @@ function updateEventSelector() {
       applyFilterAndRender();
     });
   });
+}
+
+// 特定のイベント(公演)のデータをまとめて削除する。
+// このアプリでは1つのCSVファイル = 1つのイベントとして扱われるため、
+// そのイベントキーを持つファイルをfilesDataとlocalStorageの両方から削除する。
+function deleteEvent(ev) {
+  const filenames = [];
+  filesData.forEach((recs, filename) => {
+    if (recs.length && recs[0].event === ev) filenames.push(filename);
+  });
+  if (!filenames.length) return;
+  const label = customEventNames.get(ev) || shortEventLabel(ev);
+  if (!confirm(`「${label}」のデータを削除します。よろしいですか?(元に戻せません)`)) return;
+  filenames.forEach(filename => {
+    filesData.delete(filename);
+    removeStoredFile(filename);
+  });
+  updateFileList();
+  recomputeAndRender();
 }
 
 function applyFilterAndRender() {
