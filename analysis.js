@@ -1,0 +1,515 @@
+// 主催ライブ チケット購入者分析ロジック (ブラウザ / Node 共用)
+// analyze.py の集計ロジックをJavaScriptに移植したもの。
+
+const STATUS_ISSUED = "発券済み";
+
+function normStr(v) {
+  if (v === undefined || v === null) return "";
+  return String(v).trim();
+}
+
+function toNum(v, fallback) {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+// difflib.SequenceMatcher.ratio() の簡易近似 (Levenshtein距離ベース)
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+
+function similarityRatio(a, b) {
+  if (a === b) return 1;
+  const dist = levenshtein(a, b);
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1;
+  return 1 - dist / maxLen;
+}
+
+// Dateオブジェクトを "ブラウザのローカル時刻" のまま YYYY-MM-DD / YYYY-MM-DD HH:MM 文字列にする。
+// toISOString()はUTCに変換してしまい、CSVの申込日時(タイムゾーン情報なし)とはズレるため使わない。
+function formatLocalDate(d) {
+  if (!d || isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function formatLocalDateTime(d) {
+  if (!d || isNaN(d.getTime())) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function findSimilarNames(names, cutoff = 0.82) {
+  const uniq = Array.from(new Set(names.filter((n) => n && n.trim()))).sort();
+  const pairs = [];
+  for (let i = 0; i < uniq.length; i++) {
+    for (let j = i + 1; j < uniq.length; j++) {
+      const ratio = similarityRatio(uniq[i], uniq[j]);
+      if (ratio >= cutoff) {
+        pairs.push({ 候補A: uniq[i], 候補B: uniq[j], 類似度: Math.round(ratio * 100) / 100 });
+      }
+    }
+  }
+  pairs.sort((x, y) => y.類似度 - x.類似度);
+  return pairs;
+}
+
+// 1行分のCSVレコードを正規化する
+function normalizeRow(row, venue, dateLabel, sourceFile) {
+  const email = normStr(row["申込者Email"]);
+  const uid = normStr(row["申込者UID"]);
+  const name = normStr(row["申込者本名"]);
+  const phone = normStr(row["申込者電話番号"]);
+  let customerKey;
+  if (email) customerKey = "email:" + email.toLowerCase();
+  else if (uid) customerKey = "uid:" + uid;
+  else customerKey = `name:${name}|${phone}`;
+
+  const qty = toNum(row["申込枚数"], 1);
+  const price = toNum(row["チケット単価"], 0);
+
+  return {
+    申込日時: row["申込日時"] ? new Date(row["申込日時"].replace(" ", "T")) : null,
+    申込者本名: name,
+    申込者Email: email,
+    申込者電話番号: phone,
+    申込者性別: normStr(row["申込者性別"]),
+    申込者年齢: row["申込者年齢"] !== undefined && row["申込者年齢"] !== "" ? toNum(row["申込者年齢"], null) : null,
+    申込者都道府県: normStr(row["申込者都道府県"]),
+    お目当て: normStr(row["お目当て"]),
+    ステータス: normStr(row["ステータス"]),
+    支払い方法: normStr(row["支払い方法"]),
+    券種名: normStr(row["券種名"]),
+    申込枚数: qty,
+    チケット単価: price,
+    金額: qty * price,
+    event: `${venue}_${dateLabel}`,
+    event_venue: venue,
+    source_file: sourceFile,
+    customer_key: customerKey,
+  };
+}
+
+// PapaParseの結果(rows: オブジェクト配列)から正規化済みレコード配列を作る
+function loadEventRows(rows, sourceFile) {
+  // CSVには公演(ライブ)当日の日付が含まれていないため、
+  // 「その公演で最後にチケット申込があった日時」(=チケット販売終了に近いタイミング)を
+  // 開催日の目安(イベントキー)として使う。受付が始まった日時より、終了に近い日時のほうが
+  // 実際の公演日に近いという想定。
+  const withDates = rows
+    .map((r) => (r["申込日時"] ? new Date(r["申込日時"].replace(" ", "T")) : null))
+    .filter((d) => d && !isNaN(d.getTime()));
+  const latest = withDates.length ? new Date(Math.max(...withDates.map((d) => d.getTime()))) : null;
+  const venue = (rows.find((r) => normStr(r["会場名/公演名"]))?.["会場名/公演名"] || sourceFile).trim();
+
+  const pad = (n) => String(n).padStart(2, "0");
+  const dateLabel = latest
+    ? `${latest.getFullYear()}-${pad(latest.getMonth() + 1)}-${pad(latest.getDate())}_${pad(latest.getHours())}${pad(latest.getMinutes())}`
+    : sourceFile;
+
+  return rows.map((r) => normalizeRow(r, venue, dateLabel, sourceFile));
+}
+
+function eventOrder(records) {
+  const latestByEvent = new Map();
+  for (const r of records) {
+    if (!r.申込日時) continue;
+    const t = r.申込日時.getTime();
+    if (!latestByEvent.has(r.event) || t > latestByEvent.get(r.event)) latestByEvent.set(r.event, t);
+  }
+  return Array.from(latestByEvent.entries())
+    .sort((a, b) => a[1] - b[1])
+    .map(([ev]) => ev);
+}
+
+function groupBy(arr, keyFn) {
+  const m = new Map();
+  for (const item of arr) {
+    const k = keyFn(item);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(item);
+  }
+  return m;
+}
+
+function sum(arr, fn) {
+  return arr.reduce((a, b) => a + fn(b), 0);
+}
+
+function buildEventSummary(records) {
+  const order = eventOrder(records);
+  const byEvent = groupBy(records, (r) => r.event);
+  return order.map((ev) => {
+    const sub = byEvent.get(ev);
+    const issued = sub.filter((r) => r.ステータス === STATUS_ISSUED);
+    const expired = sub.filter((r) => r.ステータス !== STATUS_ISSUED);
+    const cvs = sub.filter((r) => r.支払い方法 === "コンビニ");
+    const allDates = sub.map((r) => r.申込日時).filter(Boolean).sort((a, b) => a - b);
+    const startDate = allDates[0];
+    const endDate = allDates[allDates.length - 1];
+    return {
+      公演: ev,
+      会場: sub[0].event_venue,
+      開催日目安: formatLocalDate(endDate),
+      申込開始日時: formatLocalDateTime(startDate),
+      申込終了日時: formatLocalDateTime(endDate),
+      申込件数: sub.length,
+      ユニーク購入者数: new Set(sub.map((r) => r.customer_key)).size,
+      発券済み枚数: sum(issued, (r) => r.申込枚数),
+      確定売上: sum(issued, (r) => r.金額),
+      期限切れ_未発券件数: expired.length,
+      機会損失額: sum(expired, (r) => r.金額),
+      コンビニ払い件数: cvs.length,
+      平均年齢: (() => {
+        const ages = sub.map((r) => r.申込者年齢).filter((a) => a !== null && a !== undefined);
+        return ages.length ? Math.round((sum(ages, (a) => a) / ages.length) * 10) / 10 : null;
+      })(),
+      男性数: sub.filter((r) => r.申込者性別 === "男性").length,
+      女性数: sub.filter((r) => r.申込者性別 === "女性").length,
+    };
+  });
+}
+
+function buildCustomerMaster(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED);
+  const byCustomer = groupBy(issued, (r) => r.customer_key);
+  const result = [];
+  for (const [key, rows] of byCustomer.entries()) {
+    const events = new Set(rows.map((r) => r.event));
+    const dates = rows.map((r) => r.申込日時).filter(Boolean).sort((a, b) => a - b);
+    result.push({
+      customer_key: key,
+      表示名: rows[0].申込者本名,
+      Email: rows[0].申込者Email,
+      来場回数: events.size,
+      累計枚数: sum(rows, (r) => r.申込枚数),
+      累計金額: sum(rows, (r) => r.金額),
+      初回来場: dates.length ? formatLocalDateTime(dates[0]) : null,
+      最終来場: dates.length ? formatLocalDateTime(dates[dates.length - 1]) : null,
+      参加公演: Array.from(events).sort().join(", "),
+    });
+  }
+  result.sort((a, b) => b.来場回数 - a.来場回数 || b.累計金額 - a.累計金額);
+  return result;
+}
+
+function buildNewVsRepeat(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED);
+  const order = eventOrder(issued);
+  const byEvent = groupBy(issued, (r) => r.event);
+  const seen = new Set();
+  const rows = [];
+  for (const ev of order) {
+    const customers = new Set(byEvent.get(ev).map((r) => r.customer_key));
+    let newCount = 0,
+      repeatCount = 0;
+    for (const c of customers) {
+      if (seen.has(c)) repeatCount++;
+      else newCount++;
+    }
+    rows.push({
+      公演: ev,
+      新規顧客数: newCount,
+      リピーター数: repeatCount,
+      リピーター比率: customers.size ? Math.round((repeatCount / customers.size) * 1000) / 10 : 0,
+    });
+    for (const c of customers) seen.add(c);
+  }
+  return rows;
+}
+
+// 過去Nヶ月(デフォルト3ヶ月)を基準にした「ファン離脱」「ファン獲得」分析。
+// 基準日は「データ内で最も新しい申込日時」を採用する(実行日ではなく、読み込んだCSVの最新日を「現在」とみなす)。
+// これにより、過去のCSVをまとめて読み込んでも常に安定した結果になる。
+function buildFanChurn(records, months = 3) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED && r.申込日時 && !isNaN(r.申込日時.getTime()));
+  if (issued.length === 0) {
+    return { referenceDate: null, cutoffDate: null, months, churned: [], acquired: [], activeCount: 0, totalCount: 0 };
+  }
+
+  const referenceDate = new Date(Math.max(...issued.map((r) => r.申込日時.getTime())));
+  const cutoffDate = new Date(referenceDate);
+  cutoffDate.setMonth(cutoffDate.getMonth() - months);
+
+  const byCustomer = groupBy(issued, (r) => r.customer_key);
+  const churned = [];
+  const acquired = [];
+  let activeCount = 0;
+
+  for (const [, rows] of byCustomer.entries()) {
+    const dates = rows.map((r) => r.申込日時).sort((a, b) => a - b);
+    const firstVisit = dates[0];
+    const lastVisit = dates[dates.length - 1];
+    const visitCount = new Set(rows.map((r) => r.event)).size;
+    const last = rows.find((r) => r.申込日時.getTime() === lastVisit.getTime()) || rows[0];
+
+    if (lastVisit < cutoffDate) {
+      // 直近Nヶ月に来場履歴がない = 離脱ファン(再アプローチ用に詳細項目まで記録する)
+      const monthsSince = Math.round(((referenceDate - lastVisit) / (1000 * 60 * 60 * 24 * 30.44)) * 10) / 10;
+      churned.push({
+        表示名: last.申込者本名,
+        Email: last.申込者Email,
+        電話番号: last.申込者電話番号,
+        性別: last.申込者性別,
+        年齢: last.申込者年齢,
+        都道府県: last.申込者都道府県,
+        直近のお目当て: last.お目当て,
+        来場回数: visitCount,
+        初回来場日: formatLocalDate(firstVisit),
+        最終来場日: formatLocalDate(lastVisit),
+        経過月数: monthsSince,
+        累計枚数: sum(rows, (r) => r.申込枚数),
+        累計金額: sum(rows, (r) => r.金額),
+        参加公演: Array.from(new Set(rows.map((r) => r.event))).sort().join(", "),
+      });
+    } else {
+      activeCount++;
+    }
+
+    if (firstVisit >= cutoffDate) {
+      // 初回来場が直近Nヶ月以内 = 新規獲得ファン
+      acquired.push({
+        表示名: last.申込者本名,
+        Email: last.申込者Email,
+        初回来場日: formatLocalDate(firstVisit),
+        現在までの来場回数: visitCount,
+      });
+    }
+  }
+
+  churned.sort((a, b) => b.経過月数 - a.経過月数);
+  acquired.sort((a, b) => b.現在までの来場回数 - a.現在までの来場回数 || (b.初回来場日 || "").localeCompare(a.初回来場日 || ""));
+
+  return {
+    referenceDate: formatLocalDate(referenceDate),
+    cutoffDate: formatLocalDate(cutoffDate),
+    months,
+    churned,
+    acquired,
+    activeCount,
+    totalCount: byCustomer.size,
+  };
+}
+
+function buildPerformerSummary(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED && r.お目当て);
+  const byPerformer = groupBy(issued, (r) => r.お目当て);
+  const rows = [];
+  for (const [name, sub] of byPerformer.entries()) {
+    const uniqueFans = new Set(sub.map((r) => r.customer_key)).size;
+    const eventCount = new Set(sub.map((r) => r.event)).size;
+    rows.push({
+      お目当て: name,
+      申込件数: sub.length,
+      ユニーク集客数: uniqueFans,
+      出演公演数: eventCount,
+      // 1公演あたりの平均動員数(ユニーク集客数 ÷ 出演公演数)。
+      // 出演回数が少なくても毎回よく集客している出演者を見つけるための指標。
+      公演あたり平均動員数: eventCount ? Math.round((uniqueFans / eventCount) * 10) / 10 : 0,
+    });
+  }
+  rows.sort((a, b) => b.申込件数 - a.申込件数);
+  return rows;
+}
+
+function buildPerformerOverlap(records, topN = 10) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED && r.お目当て);
+  const counts = new Map();
+  for (const r of issued) counts.set(r.お目当て, (counts.get(r.お目当て) || 0) + 1);
+  const top = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([name]) => name);
+  const fanSets = new Map(top.map((p) => [p, new Set(issued.filter((r) => r.お目当て === p).map((r) => r.customer_key))]));
+  const rows = [];
+  for (let i = 0; i < top.length; i++) {
+    for (let j = i + 1; j < top.length; j++) {
+      const a = fanSets.get(top[i]);
+      const b = fanSets.get(top[j]);
+      const inter = new Set([...a].filter((x) => b.has(x)));
+      const union = new Set([...a, ...b]);
+      if (union.size === 0) continue;
+      rows.push({
+        出演者A: top[i],
+        出演者B: top[j],
+        共通ファン数: inter.size,
+        重複率: Math.round((inter.size / union.size) * 1000) / 10,
+      });
+    }
+  }
+  rows.sort((a, b) => b.共通ファン数 - a.共通ファン数);
+  return rows;
+}
+
+function buildDemographics(records) {
+  const issued = records.filter((r) => r.ステータス === STATUS_ISSUED);
+  const ageBins = [
+    [0, 19, "~19"], [20, 24, "20-24"], [25, 29, "25-29"], [30, 34, "30-34"],
+    [35, 39, "35-39"], [40, 44, "40-44"], [45, 49, "45-49"], [50, 54, "50-54"],
+    [55, 59, "55-59"], [60, 999, "60+"],
+  ];
+  const ageCounts = new Map(ageBins.map((b) => [b[2], 0]));
+  for (const r of issued) {
+    if (r.申込者年齢 === null || r.申込者年齢 === undefined) continue;
+    const bin = ageBins.find(([lo, hi]) => r.申込者年齢 >= lo && r.申込者年齢 <= hi);
+    if (bin) ageCounts.set(bin[2], ageCounts.get(bin[2]) + 1);
+  }
+
+  const genderCounts = new Map();
+  for (const r of issued) {
+    if (!r.申込者性別) continue;
+    genderCounts.set(r.申込者性別, (genderCounts.get(r.申込者性別) || 0) + 1);
+  }
+
+  const prefCounts = new Map();
+  for (const r of issued) {
+    if (!r.申込者都道府県) continue;
+    prefCounts.set(r.申込者都道府県, (prefCounts.get(r.申込者都道府県) || 0) + 1);
+  }
+
+  const ticketTypeCounts = new Map();
+  for (const r of issued) {
+    if (!r.券種名) continue;
+    ticketTypeCounts.set(r.券種名, (ticketTypeCounts.get(r.券種名) || 0) + 1);
+  }
+
+  return {
+    age: Array.from(ageCounts.entries()).map(([k, v]) => ({ label: k, count: v })),
+    gender: Array.from(genderCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => ({ label: k, count: v })),
+    prefecture: Array.from(prefCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => ({ label: k, count: v })),
+    ticketType: Array.from(ticketTypeCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => ({ label: k, count: v })),
+  };
+}
+
+function buildTimingAnalysis(records) {
+  const withDate = records.filter((r) => r.申込日時);
+
+  const order = eventOrder(withDate);
+  const byEvent = groupBy(withDate, (r) => r.event);
+  const speed = order.map((ev) => {
+    const sub = byEvent.get(ev);
+    const dates = sub.map((r) => r.申込日時).sort((a, b) => a - b);
+    const start = dates[0].getTime();
+    const total = sub.length;
+
+    // 開催日目安(=最終申込日)を基準にした「前日」「当日」の判定
+    const eventDay = dates[dates.length - 1];
+    const eventDayStr = formatLocalDate(eventDay);
+    const prevDay = new Date(eventDay);
+    prevDay.setDate(prevDay.getDate() - 1);
+    const prevDayStr = formatLocalDate(prevDay);
+
+    // 申込1件ごとに、重複なくどれか1つのタイミング区分に割り振り、
+    // 全申込(=100%)をその内訳として配分する。
+    // 優先順位: 当日 → 前日 → 発売開始からの経過時間(初速の区分)
+    const buckets = {
+      "10分以内": 0,
+      "10分~1時間": 0,
+      "1時間~1日": 0,
+      "1日超": 0,
+      前日: 0,
+      当日: 0,
+    };
+    for (const r of sub) {
+      const dayStr = formatLocalDate(r.申込日時);
+      if (dayStr === eventDayStr) {
+        buckets.当日++;
+        continue;
+      }
+      if (dayStr === prevDayStr) {
+        buckets.前日++;
+        continue;
+      }
+      const elapsedMin = (r.申込日時.getTime() - start) / 60000;
+      if (elapsedMin <= 10) buckets["10分以内"]++;
+      else if (elapsedMin <= 60) buckets["10分~1時間"]++;
+      else if (elapsedMin <= 1440) buckets["1時間~1日"]++;
+      else buckets["1日超"]++;
+    }
+
+    const pct = (count) => (total ? Math.round((count / total) * 1000) / 10 : 0);
+
+    return {
+      公演: ev,
+      申込件数: total,
+      "10分以内件数": buckets["10分以内"],
+      "10分以内率": pct(buckets["10分以内"]),
+      "10分~1時間件数": buckets["10分~1時間"],
+      "10分~1時間率": pct(buckets["10分~1時間"]),
+      "1時間~1日件数": buckets["1時間~1日"],
+      "1時間~1日率": pct(buckets["1時間~1日"]),
+      "1日超件数": buckets["1日超"],
+      "1日超率": pct(buckets["1日超"]),
+      前日件数: buckets.前日,
+      前日率: pct(buckets.前日),
+      当日件数: buckets.当日,
+      当日率: pct(buckets.当日),
+      かけこみ件数: buckets.前日 + buckets.当日,
+      かけこみ率: pct(buckets.前日 + buckets.当日),
+    };
+  });
+
+  return { speed };
+}
+
+function buildDataQuality(records) {
+  const performerNames = records.map((r) => r.お目当て).filter(Boolean);
+  const ticketTypeNames = records.map((r) => r.券種名).filter(Boolean);
+  return {
+    performerDupe: findSimilarNames(performerNames),
+    ticketTypeDupe: findSimilarNames(ticketTypeNames),
+    missing: {
+      email: records.filter((r) => !r.申込者Email).length,
+      prefecture: records.filter((r) => !r.申込者都道府県).length,
+      age: records.filter((r) => r.申込者年齢 === null || r.申込者年齢 === undefined).length,
+      gender: records.filter((r) => !r.申込者性別).length,
+    },
+  };
+}
+
+function runFullAnalysis(records) {
+  return {
+    eventSummary: buildEventSummary(records),
+    customerMaster: buildCustomerMaster(records),
+    newVsRepeat: buildNewVsRepeat(records),
+    performerSummary: buildPerformerSummary(records),
+    performerOverlap: buildPerformerOverlap(records),
+    demographics: buildDemographics(records),
+    timing: buildTimingAnalysis(records),
+    quality: buildDataQuality(records),
+  };
+}
+
+if (typeof module !== "undefined") {
+  module.exports = {
+    loadEventRows,
+    runFullAnalysis,
+    buildEventSummary,
+    buildCustomerMaster,
+    buildNewVsRepeat,
+    buildFanChurn,
+    buildPerformerSummary,
+    buildPerformerOverlap,
+    buildDemographics,
+    buildTimingAnalysis,
+    buildDataQuality,
+    findSimilarNames,
+  };
+}
